@@ -18,10 +18,14 @@
 7. [Vínculo Issue ↔ Pull Request](#7-vínculo-issue--pull-request)
 8. [Etapa 4 — Workflows nativos do Project](#8-etapa-4--workflows-nativos-do-project)
 9. [Etapa 5 — GraphQL na mão](#9-etapa-5--graphql-na-mão)
-10. [Referência rápida de comandos `gh`](#10-referência-rápida-de-comandos-gh)
-11. [Descobertas e pegadinhas](#11-descobertas-e-pegadinhas)
-12. [Decisões](#12-decisões)
-13. [Próximas etapas](#13-próximas-etapas)
+10. [Etapa 6 — Credencial do Actions (GitHub App)](#10-etapa-6--credencial-do-actions-github-app)
+
+**Apêndices**
+
+- [A — Referência rápida de comandos `gh`](#apêndice-a--referência-rápida-de-comandos-gh)
+- [B — Descobertas e pegadinhas](#apêndice-b--descobertas-e-pegadinhas)
+- [C — Decisões](#apêndice-c--decisões)
+- [D — Próximas etapas](#apêndice-d--próximas-etapas)
 
 ---
 
@@ -105,7 +109,7 @@ Project        PVT_...     "qual quadro"         ex.: PVT_kwDOFGh-zs4Bm-j7
 
 - **Item ≠ Issue.** O Item é a Issue **dentro de um Project específico**. Para mover um card, é preciso descobrir o Item ID daquela Issue naquele Project.
 - Prefixos: `PVTSSF` = single select field, `PVTIF` = iteration field, `PVTF` = campo comum.
-- Os IDs acima são **exemplos deste laboratório**. Automações não devem tê-los fixos no código: devem resolver por nome em tempo de execução (ver [Decisões](#12-decisões)).
+- Os IDs acima são **exemplos deste laboratório**. Automações não devem tê-los fixos no código: devem resolver por nome em tempo de execução (ver [Decisões](#apêndice-c--decisões)).
 
 ---
 
@@ -728,7 +732,170 @@ O script funcionou **sem nenhuma alteração** no Project copiado, que tem IDs n
 
 ---
 
-## 10. Referência rápida de comandos `gh`
+## 10. Etapa 6 — Credencial do Actions (GitHub App)
+
+O `GITHUB_TOKEN` automático do Actions **não acessa Projects V2**. É preciso outra credencial.
+
+### 10.1 Opções de credencial
+
+| | PAT classic | Fine-grained PAT | **GitHub App** |
+|---|---|---|---|
+| Pertence a | Uma pessoa | Uma pessoa | **A organização** |
+| Se a pessoa sai | Automação quebra | Automação quebra | Continua funcionando |
+| Permissões | Escopos amplos | Granulares | Granulares, por repositório instalado |
+| Validade do token | Longa | Longa | **1 hora**, gerado a cada execução e revogado ao fim do job |
+| Autor das ações | A pessoa | A pessoa | Bot (`nome-do-app[bot]`) |
+| Projects de usuário | ✅ | ❌ | ❌ |
+| Projects de organização | ✅ | ✅ | ✅ |
+
+**Escolha:** GitHub App (Project de organização). PAT classic só faz sentido para Project de **usuário**.
+
+```
+Secret (chave privada .pem) + Variable (Client ID)
+        │  actions/create-github-app-token
+        ▼
+token de instalação (1 h, só nos repositórios onde o App está instalado)
+        │  GH_TOKEN=<token>
+        ▼
+scripts/project-status.sh → GraphQL → Project
+```
+
+### 10.2 Criar e instalar o App (owner da organização, interface)
+
+1. *Settings* da org → *Developer settings* → *GitHub Apps* → **New GitHub App**.
+2. Preencher:
+
+   | Campo | Valor |
+   |---|---|
+   | Name | `gabs-x-lab-kanban-bot` (único no GitHub) |
+   | Homepage URL | URL do repositório |
+   | Webhook → Active | **Desmarcado** (quem dispara são os eventos do Actions) |
+   | Where can this GitHub App be installed? | **Only on this account** |
+
+3. Permissões (menor privilégio):
+
+   | Permissão | Nível | Para quê |
+   |---|---|---|
+   | Repository → Issues | Read-only | `projectItems` das Issues |
+   | Repository → Pull requests | Read-only | `closingIssuesReferences`, `isDraft`, `reviewDecision` |
+   | Repository → Metadata | Read-only | Obrigatória |
+   | Organization → **Projects** | **Read and write** | Ler o Project e mover cards |
+
+4. **Create GitHub App** → anotar o **Client ID** (e o App ID) → *Private keys* → **Generate a private key** (baixa um `.pem`).
+5. **Install App** → org → **Only select repositories** → o repositório do Kanban.
+
+Conferência pela API (sem expor segredos):
+
+```bash
+gh api orgs/ORG/installations --jq '.installations[] | {app_slug, repository_selection, permissions}'
+gh api apps/SLUG --jq '{id, client_id}'
+```
+
+### 10.3 Secret e Variables
+
+| Nome | Tipo | Valor | Quem cadastra |
+|---|---|---|---|
+| `PROJECT_APP_PRIVATE_KEY` | **Secret** | Conteúdo completo do `.pem` (com as linhas `BEGIN`/`END`) | Owner, **pela interface** (o valor nunca passa por terminal) |
+| `PROJECT_APP_CLIENT_ID` | Variable | Client ID do App (`Iv23...`) | `gh variable set` |
+| `PROJECT_OWNER` | Variable | `Gabs-X-Lab` | `gh variable set` |
+| `PROJECT_NUMBER` | Variable | `1` | `gh variable set` |
+| `OWNER_TYPE` | Variable | `organization` | `gh variable set` |
+
+- **Secret**: mascarado nos logs (`***`) e não pode ser lido de volta. No workflow: `${{ secrets.NOME }}`.
+- **Variable**: visível em *Settings* e nos logs; pode ser alterada sem mexer no código. No workflow: `${{ vars.NOME }}`.
+- Depois de cadastrar, apagar o `.pem` local (ou guardar em gerenciador de senhas). Se vazar: revogar a chave na página do App e gerar outra.
+- Em organização com vários repositórios, o mesmo Secret/Variable pode ser criado **no nível da org** e liberado para repositórios selecionados.
+
+### 10.4 Validação da action na documentação
+
+Consultado direto no repositório oficial (release mais recente e `action.yml`):
+
+```bash
+gh api repos/actions/create-github-app-token/releases/latest --jq .tag_name
+gh api "repos/actions/create-github-app-token/contents/action.yml?ref=TAG" -H "Accept: application/vnd.github.raw"
+```
+
+| Achado | Consequência |
+|---|---|
+| Versão atual: `v3.3.0` (runtime `node24`) | Versão usada |
+| `app-id` está **obsoleto** (*"Use 'client-id' instead."*) | Usar `client-id` → Variable `PROJECT_APP_CLIENT_ID` |
+| Entradas `permission-<nome>` | O token pode ser emitido com **menos** permissões que o App tem |
+| Saídas: `token`, `installation-id`, `app-slug` | `token` vai para `GH_TOKEN` |
+| Passo *post* da action | Revoga o token ao fim do job |
+
+### 10.5 Workflow de teste de fumaça
+
+`.github/workflows/project-smoke-test.yml`: gera o token do App **somente leitura** e roda o script em `--dry-run`.
+
+| Gatilho | Quando | O que testa |
+|---|---|---|
+| `pull_request` com `paths:` (script ou o próprio workflow) | PR que altera esses arquivos | Modo `--pr`: PR → Issue vinculada → card |
+| `workflow_dispatch` | Botão *Run workflow* (só com o arquivo na branch padrão) | Modo `--issue 1` |
+
+**Boas práticas aplicadas**
+
+| Prática | Motivo |
+|---|---|
+| `permissions: contents: read` | `GITHUB_TOKEN` padrão só com leitura |
+| `permission-issues/pull-requests/organization-projects: read` no token | O teste não precisa escrever, mesmo o App podendo |
+| Actions fixadas por **SHA** com a versão em comentário (`@3d3c42e... # v7.0.1`) | Tags podem ser movidas; SHA não. Proteção contra ataque de cadeia de suprimentos |
+| Script executado direto (`scripts/project-status.sh`) | Valida o bit executável e o LF do `.gitattributes` no runner Linux |
+
+Para descobrir o SHA de uma versão:
+
+```bash
+gh api repos/actions/checkout/git/ref/tags/v7.0.1 --jq '.object.sha'
+```
+
+> ⚠️ Em PRs vindos de **fork**, secrets não são entregues ao workflow (o teste falharia). Neste laboratório as branches são todas do mesmo repositório.
+
+### 10.6 Resultado (PR #5)
+
+O workflow disparou sozinho ao abrir o PR #5 e passou em todos os passos:
+
+```
+✓ Checkout
+✓ Gerar token do GitHub App (somente leitura)
+✓ Ler o Project (dry-run)
+    [project-status] Project PVT_kwDOFGh-zs4Bm-j7 | campo PVTSSF_lADOFGh-zs4Bm-j7zhllRnk | 'Draft PR' = 067f21de
+    [project-status] [dry-run] #4: 'Backlog' → 'Draft PR' (item PVTI_lADOFGh-zs4Bm-j7zhApnsQ)
+✓ Post Gerar token do GitHub App (revoga o token)
+```
+
+Para acompanhar pelo terminal:
+
+```bash
+gh run list --limit 3
+gh run watch <id> --exit-status
+gh run view <id> --log
+```
+
+### 10.7 Permissão de quem revisa
+
+Ao aprovar o PR #3 com a conta revisora, o merge continuou bloqueado (`reviewDecision = REVIEW_REQUIRED`), mesmo com a review `APPROVED` registrada.
+
+**Causa:** membros de uma org nova têm permissão base **Read**. Em repositório público qualquer pessoa consegue *enviar* uma aprovação, mas a regra de review **só conta aprovações de quem tem Write**.
+
+**Correção** (menor privilégio: só neste repositório, sem mudar a base da org):
+
+```bash
+gh api repos/ORG/REPO/collaborators/LOGIN/permission --jq .role_name   # read
+gh api -X PUT repos/ORG/REPO/collaborators/LOGIN -f permission=push
+```
+
+A aprovação já existente passou a contar imediatamente (`APPROVED` / `mergeState=CLEAN`), sem precisar aprovar de novo.
+
+### 10.8 Checklist para o owner da organização da empresa
+
+- [ ] Criar o GitHub App com as permissões de 10.2 e instalar **só** nos repositórios do piloto
+- [ ] Cadastrar o Secret `PROJECT_APP_PRIVATE_KEY` e as Variables de 10.3
+- [ ] Garantir **Write** para quem revisa PRs (senão a aprovação não conta)
+- [ ] Copiar o Project do laboratório (`copyProjectV2`) ou criar um novo e reconfigurar o Auto-add
+- [ ] Confirmar o consumo de minutos do Actions (repositório privado)
+
+---
+
+## Apêndice A — Referência rápida de comandos `gh`
 
 | Comando | Para quê |
 |---|---|
@@ -764,7 +931,7 @@ O script funcionou **sem nenhuma alteração** no Project copiado, que tem IDs n
 
 ---
 
-## 11. Descobertas e pegadinhas
+## Apêndice B — Descobertas e pegadinhas
 
 | # | Descoberta | Impacto |
 |---|---|---|
@@ -796,10 +963,14 @@ O script funcionou **sem nenhuma alteração** no Project copiado, que tem IDs n
 | 26 | `copyProjectV2` copia campos, views e workflows (com estado), mas não o Auto-add nem a visibilidade | Refazer Auto-add e tornar público após copiar |
 | 27 | Na cópia, IDs de Project e campos mudam; IDs de opções são preservados | Reforça a estratégia de IDs por nome |
 | 28 | Project de org consultado como usuário falha com `Could not resolve to a User` | `OWNER_TYPE=organization` é obrigatório em org |
+| 29 | Aprovação de quem tem só **Read** é registrada, mas não conta para a regra de review | Revisores precisam de Write no repositório |
+| 30 | Membros de org nova têm permissão base **Read** | Dar Write por repositório (menor privilégio), não na base da org |
+| 31 | `app-id` da `create-github-app-token` está obsoleto na v3 | Usar `client-id` |
+| 32 | O token do App pode ser emitido com menos permissões que o App tem (`permission-*`) | Cada workflow pede só o que usa |
 
 ---
 
-## 12. Decisões
+## Apêndice C — Decisões
 
 ### Tomadas
 
@@ -816,11 +987,11 @@ O script funcionou **sem nenhuma alteração** no Project copiado, que tem IDs n
 
 ---
 
-## 13. Próximas etapas
+## Apêndice D — Próximas etapas
 
 - [x] Etapa 4 — Workflows nativos
 - [x] Etapa 5 — GraphQL na mão
-- [ ] Etapa 6 — Credencial (PAT/App) e Secrets
+- [x] Etapa 6 — Credencial (GitHub App) e Secrets
 - [ ] Etapa 7 — Actions: Draft PR, In Review, Approved, Merge/Closed
 - [ ] Etapa 8 — Casos de borda
 - [ ] Etapa 9 — Detectar início de desenvolvimento
