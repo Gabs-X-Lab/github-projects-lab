@@ -1,0 +1,50 @@
+# Automação do Kanban: move a Issue vinculada ao PR (Closes #N) conforme o estado do PR.
+# A lógica de GraphQL fica em scripts/project-status.sh (IDs resolvidos por nome).
+#
+# Implementado por etapas:
+#   7a. PR rascunho aberto/reaberto/convertido → "Draft PR"
+
+name: Project automation
+
+on:
+  pull_request:
+    types: [opened, reopened, converted_to_draft]
+
+permissions:
+  contents: read
+
+# Eventos do mesmo PR rodam em fila, na ordem em que chegaram.
+concurrency:
+  group: project-automation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  draft-pr:
+    name: Draft PR → "Draft PR"
+    if: github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (somente scripts/)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Gerar token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: write
+
+      - name: Mover Issues vinculadas para "Draft PR"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          OWNER_TYPE: ${{ vars.OWNER_TYPE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/project-status.sh --pr "$PR_NUMBER" --status "Draft PR"
