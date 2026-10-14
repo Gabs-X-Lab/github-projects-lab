@@ -21,6 +21,7 @@
 10. [Etapa 6 — Credencial do Actions (GitHub App)](#10-etapa-6--credencial-do-actions-github-app)
 11. [Etapa 7 — Automação com GitHub Actions](#11-etapa-7--automação-com-github-actions)
 12. [Etapa 8 — Casos de borda](#12-etapa-8--casos-de-borda)
+13. [Etapa 9 — Início do desenvolvimento](#13-etapa-9--início-do-desenvolvimento)
 
 **Apêndices**
 
@@ -56,6 +57,7 @@ Sugestão → Backlog → To Do → In Progress → Draft PR → In Review → A
 |---|---|---|
 | Issue criada → entra no Project em **Backlog** | Nativos *Auto-add to project* + *Item added to project* | ✅ funcionando |
 | Issue reaberta → **To Do** | Nativo *Item reopened* | ✅ funcionando |
+| Branch criada pela Issue → **In Progress** (só a partir de Backlog / To Do) | GitHub Actions (`project-dev-started.yml`) | ✅ Etapa 9 |
 | PR vinculado → In Progress | Nativo *Pull request linked to issue* | ⚪ desligado na Etapa 4 (substituído pela Action) |
 | PR rascunho aberto/reaberto/convertido → **Draft PR** | GitHub Actions (`project-automation.yml`) | ✅ Etapa 7a |
 | PR pronto para revisão → **In Review** | GitHub Actions | ✅ Etapa 7b |
@@ -1277,6 +1279,99 @@ on:
 
 ---
 
+## 13. Etapa 9 — Início do desenvolvimento
+
+**Problema:** até a Etapa 8, a Issue só saía de Backlog / To Do quando um PR era aberto. Entre "alguém pegou a tarefa" e o primeiro PR, o card ficava parado (ou dependia de arrastar à mão).
+
+### 13.1 Sinais comparados
+
+| Sinal | Evento do Actions | Indica início? | Decisão |
+|---|---|---|---|
+| Issue atribuída | `issues: assigned` | Fraco: atribuir costuma ser **planejamento** | ❌ Não automatizado |
+| **Branch criada pela Issue** (*Create a branch* / `gh issue develop`) | `create` (branch) | **Forte**: alguém vai começar a codar | ✅ → **In Progress** |
+| Draft PR aberto cedo | `pull_request: opened` | Forte | Já coberto (7a → Draft PR) |
+| Arrastar o card | — | — | Continua valendo |
+
+### 13.2 Regra
+
+```
+Issue ABERTA, em Backlog / To Do (ou sem status), com branch em linkedBranches → In Progress
+```
+
+- **Nunca retrocede:** Issue em In Progress, Draft PR, In Review ou Approved não é tocada.
+- **O nome da branch não decide nada:** o vínculo é confirmado pela API (`Issue.linkedBranches`). Uma branch comum (sem vínculo) não move card nenhum, mesmo que se chame `feat/25-...`.
+- Não existe consulta "branch → Issue" na API: o script percorre os Items do Project (paginado) e filtra pelas `linkedBranches` de cada Issue.
+
+### 13.3 Validação na documentação (`create`)
+
+| Item | Documentação |
+|---|---|
+| Tipos de atividade | Nenhum (dispara para branch **e** tag → filtrar `ref_type == 'branch'`) |
+| `GITHUB_REF` / `GITHUB_SHA` | Branch criada / último commit dela |
+| Arquivo de workflow usado | O da **branch criada** (não há a restrição "só na branch padrão" do evento `issues`) |
+| Limitação | Não gera evento ao criar mais de 3 tags de uma vez |
+| Vínculo de branch depois de criada | **Não há evento** → reconciliação (fase 3) |
+
+Consequência prática: dá para testar **antes do merge**, criando as branches de teste a partir da branch do PR (`gh issue develop N --base feat/25-dev-started`).
+
+### 13.4 Implementação
+
+**Script** — novos modos do `scripts/project-status.sh`:
+
+```bash
+scripts/project-status.sh --branch feat/25-dev-started [--dry-run]   # Issues vinculadas a essa branch (com retry)
+scripts/project-status.sh --linked [--dry-run]                       # todas as Issues com branch vinculada
+```
+
+Colunas configuráveis: `COL_BACKLOG`, `COL_TODO`, `COL_DEV` (padrão `Backlog`, `To Do`, `In Progress`). A mutation virou a função `move_item`, usada por todos os modos.
+
+**Workflow** — `.github/workflows/project-dev-started.yml`:
+
+```yaml
+on:
+  create:
+
+concurrency:
+  group: project-dev-started-${{ github.event.ref }}
+
+jobs:
+  dev-started:
+    if: github.event.ref_type == 'branch'
+    # ... checkout de scripts/ + token do App (permission-issues: read, organization-projects: write)
+    steps:
+      - run: scripts/project-status.sh --branch "$BRANCH"   # BRANCH = github.event.ref
+```
+
+- Workflow separado do `project-automation.yml`: lá a `concurrency` é por número de PR, que não existe no `create`.
+- O token do App **não precisou de permissão nova**: `linkedBranches` é lido com *Issues: read*.
+
+**Reconciliação** — fase 3 no `project-reconcile.yml`: `scripts/project-status.sh --linked` (cobre branch vinculada depois de criada e eventos perdidos). Roda depois da fase 2, então uma Issue órfã que vai para To Do e tem branch vinculada termina em In Progress na mesma execução.
+
+### 13.5 Testes executados
+
+Issues descartáveis #26, #27, #28 (fechadas como *not planned*); branches apagadas depois.
+
+| # | Caso | Resultado |
+|---|---|---|
+| 1 | `gh issue develop 26` (Issue em Backlog) | `#26: branch vinculada [test/9-a] em 'Backlog' → 'In Progress'` — vínculo encontrado na 1ª tentativa |
+| 2 | Branch comum (`git push origin X:refs/heads/test/9-comum`) | 5 tentativas × 3 s; *"nenhuma Issue aberta do Project com branch vinculada. Nada a fazer."* |
+| 3a | Branch vinculada, Issue em **To Do** (#27) | → **In Progress** |
+| 3b | Branch vinculada, Issue em **In Review** (#28) | *"mas está em 'In Review'; nada a fazer."* |
+| 4 | Draft PR da branch vinculada (#29, sem `Closes`) e depois fechado sem merge | Abrir → Draft PR; fechar → **To Do** (7d). A branch **não volta** para `linkedBranches` (continua existindo no remoto) → a fase 3 não devolve a Issue para In Progress |
+| 5 | `--linked` local (reconciliação) | A própria #25, cuja branch foi criada **antes** do workflow existir, foi corrigida: Backlog → **In Progress**. 2ª execução: nada a fazer (idempotente) |
+| 6 | Regressão `--pr 24 --auto` / `--issue N --auto` | Sem mudança de comportamento |
+
+### 13.6 Limitações e observações
+
+| Item | Observação |
+|---|---|
+| Branch criada fora da Issue (`git checkout -b` + push) | Não move. Recomendação ao time: **criar a branch pela Issue** (também dispensa o `Closes`, descoberta 50) |
+| Branch comum gasta ~15 s de retry por execução | Aceitável; reduzir com `LINK_RETRIES` se o volume de branches for alto |
+| Issue em In Progress cuja branch foi apagada sem PR | Não volta para To Do (In Progress também é manual — mesma regra da Etapa 8) |
+| Custo da consulta | Percorre todos os Items do Project (100 por página). Em Projects muito grandes, filtrar por Status no futuro |
+
+---
+
 ## Apêndice A — Referência rápida de comandos `gh`
 
 | Comando | Para quê |
@@ -1289,6 +1384,7 @@ on:
 | `gh api -X POST repos/O/R/milestones -f title=...` | Milestones |
 | `gh issue create ... --project "Nome"` | Criar Issue já no Project |
 | `gh issue develop N --name BRANCH --checkout` | Branch vinculada à Issue |
+| `gh issue develop N --name BRANCH --base OUTRA` | Branch vinculada criada a partir de outra branch (testar workflows antes do merge) |
 | `gh issue close N --reason "not planned"` | Fechar sem concluir |
 | `gh pr create --draft` / `gh pr ready N` | Draft PR / pronto para review |
 | `gh pr view N --json isDraft,reviewDecision,closingIssuesReferences` | Estado do PR para automação |
@@ -1367,6 +1463,10 @@ on:
 | 48 | Sem regra de review, `reviewDecision` só é `null` enquanto o PR não tem reviews | O fallback raramente decide, mas o caminho `null` precisa funcionar |
 | 49 | `PUT` de ruleset substitui a lista `rules` inteira | Enviar todas as regras ao alterar uma |
 | 50 | PR aberto a partir de branch criada pela Issue (*Create a branch* / `gh issue develop`) já nasce vinculado (fecha a Issue) **sem** `Closes #N`; a branch some de `linkedBranches` e o PR passa a aparecer em *Development* | Fluxo recomendado ao time: criar a branch pela Issue (PR #24 → #18) |
+| 51 | O evento `create` usa o arquivo de workflow da **branch criada**, não o da branch padrão | Workflows de `create` podem ser testados antes do merge |
+| 52 | Não há evento do Actions para "branch vinculada à Issue" nem consulta "branch → Issue" na API | Percorrer os Items e filtrar `linkedBranches`; reconciliação para vínculo posterior |
+| 53 | `linkedBranches` é lido com *Issues: read* no token do GitHub App (sem *Contents*) | Nenhuma permissão nova no App |
+| 54 | Depois que o PR da branch é fechado sem merge, a branch **não volta** para `linkedBranches` | Sem "pingue-pongue" entre a fase 2 (→ To Do) e a fase 3 (→ In Progress) |
 
 ---
 
@@ -1384,6 +1484,9 @@ on:
 | Status inicial de Issue nova (Etapa 4) | **Backlog** | Sugestões entram como Draft Issue, criadas à mão |
 | *Pull request linked to issue* (Etapa 4) | **Desligado** | Não diferencia draft de pronto; a Action decide pelo `isDraft` |
 | *Not planned* em Done (Etapa 4) | **Aceitar + Auto-archive (14 dias)** | O ícone da Issue mostra o motivo; o Board não acumula itens fechados |
+| Início do desenvolvimento (Etapa 9) | **Branch vinculada → In Progress** (só a partir de Backlog / To Do) | Sinal forte e confirmável pela API; nunca retrocede |
+| Atribuição (Etapa 9) | **Não automatizar** | Atribuir é planejamento, não início de trabalho |
+| Workflow do `create` (Etapa 9) | **Separado** (`project-dev-started.yml`) | `concurrency` do `project-automation.yml` é por número de PR |
 
 ---
 
@@ -1394,6 +1497,6 @@ on:
 - [x] Etapa 6 — Credencial (GitHub App) e Secrets
 - [x] Etapa 7 — Actions: Draft PR, In Review, Approved, Merge/Closed
 - [x] Etapa 8 — Casos de borda
-- [ ] Etapa 9 — Detectar início de desenvolvimento
+- [x] Etapa 9 — Detectar início de desenvolvimento
 - [ ] Etapa 10 — Migração do ROADMAP.md
 - [ ] Etapa 11 — Demo
