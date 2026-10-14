@@ -233,7 +233,7 @@ Criar Issue
 | 3. Conceitos na prática | ✅ Concluída | 2026-10-14 | Labels `area:*`, milestones por trimestre, Issues #3/#4, Draft Issue. Ciclo manual #3 → PR #5: nativos cobrem início (Item added, PR linked) e fim (Item closed); Draft PR/In Review/Approved exigem Actions. Detalhes em `docs/MANUAL-LAB.md` |
 | 4. Workflows nativos | ✅ Concluída | 2026-10-14 | Auto-add (`is:issue is:open`) + Item added → Backlog, Item reopened → To Do, Auto-archive 14 dias, *PR linked* desligado. Testes T1–T8 com as Issues #8 e #9 |
 | 5. GraphQL na mão | ✅ Concluída | 2026-10-14 | Consultas ①–④ executadas manualmente; `scripts/project-status.sh` (IDs por nome, retry, idempotente, `--dry-run`); `.gitattributes` com LF |
-| 5.5 Migração para org | 🚧 Em andamento | 2026-10-14 | Org `Gabs-X-Lab` (Free); Project copiado com `copyProjectV2`; repositório com histórico novo |
+| 5.5 Migração para org | ✅ Concluída | 2026-10-14 | Org `Gabs-X-Lab` (Free); Project copiado com `copyProjectV2`; repositório com histórico novo; Auto-add refeito; script validado com `OWNER_TYPE=organization` |
 | 6. Credencial | ⏳ Pendente | | GitHub App (Project de organização) |
 | 7. Actions (a–d) | ⏳ Pendente | | |
 | 8. Casos de borda | ⏳ Pendente | | |
