@@ -7,6 +7,8 @@
 #   scripts/project-status.sh --pr 12 --auto [--dry-run]
 #   scripts/project-status.sh --issue 4 --status "Backlog" [--dry-run]
 #   scripts/project-status.sh --issue 4 --auto [--dry-run]
+#   scripts/project-status.sh --branch feat/4-recuperar-senha [--dry-run]
+#   scripts/project-status.sh --linked [--dry-run]
 #
 # --auto calcula a coluna de cada Issue (as vinculadas ao PR informado, ou a
 # Issue informada) olhando TODOS os PRs abertos que fecham essa Issue:
@@ -26,6 +28,13 @@
 #              em qualquer outra coluna → não altera
 #   Issues fechadas não são alteradas (ficam com os workflows nativos do Project).
 #
+# --branch / --linked (início do desenvolvimento): Issue aberta, em COL_BACKLOG ou
+# COL_TODO (ou sem status), com branch vinculada (Issue.linkedBranches, criada por
+# "Create a branch" / gh issue develop) → COL_DEV. Nunca retrocede nem toca colunas de PR.
+#   --branch NOME: só as Issues vinculadas a essa branch (com retry: o vínculo pode
+#                  chegar depois do evento). O nome NÃO é usado para adivinhar a Issue.
+#   --linked:      todas as Issues do Project com branch vinculada (reconciliação).
+#
 # Configuração (variáveis de ambiente):
 #   PROJECT_OWNER      dono do Project (login do usuário ou da organização)  [obrigatória]
 #   PROJECT_NUMBER     número do Project (ex.: 1)                             [obrigatória]
@@ -37,6 +46,8 @@
 #   COL_DRAFT / COL_REVIEW / COL_APPROVED / COL_CHANGES / COL_NO_PR
 #                      nomes das colunas do --auto (padrão: "Draft PR", "In Review",
 #                      "Approved", "In Progress", "To Do")
+#   COL_BACKLOG / COL_TODO / COL_DEV
+#                      colunas do --branch/--linked (padrão: "Backlog", "To Do", "In Progress")
 #
 # Requer apenas o GitHub CLI (`gh`) autenticado, com acesso ao Project
 # (escopo `project`). Usa o `--jq` embutido no gh; não depende de `jq`.
@@ -47,11 +58,13 @@ usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' 
 log()   { echo "[project-status] $*" >&2; }
 fail()  { echo "[project-status] ERRO: $*" >&2; exit 1; }
 
-PR="" ISSUE="" STATUS="" AUTO=0 DRY_RUN=0
+PR="" ISSUE="" BRANCH="" LINKED=0 STATUS="" AUTO=0 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pr)      PR="${2:-}"; shift 2 ;;
     --issue)   ISSUE="${2:-}"; shift 2 ;;
+    --branch)  BRANCH="${2:-}"; shift 2 ;;
+    --linked)  LINKED=1; shift ;;
     --status)  STATUS="${2:-}"; shift 2 ;;
     --auto)    AUTO=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -60,8 +73,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$PR" ] || [ -n "$ISSUE" ] || fail "informe --pr ou --issue"
-if [ "$AUTO" = 1 ]; then
+DEV_MODE=0
+if [ -n "$BRANCH" ] || [ "$LINKED" = 1 ]; then
+  DEV_MODE=1
+  [ -z "$PR$ISSUE$STATUS" ] && [ "$AUTO" = 0 ] || fail "--branch/--linked não se combinam com --pr, --issue, --status ou --auto"
+  [ -z "$BRANCH" ] || [ "$LINKED" = 0 ] || fail "use --branch ou --linked, não os dois"
+elif [ -z "$PR" ] && [ -z "$ISSUE" ]; then
+  fail "informe --pr, --issue, --branch ou --linked"
+elif [ "$AUTO" = 1 ]; then
   [ -z "$STATUS" ] || fail "use --status ou --auto, não os dois"
 else
   [ -n "$STATUS" ] || fail "--status (ou --auto) é obrigatório"
@@ -78,6 +97,9 @@ COL_REVIEW="${COL_REVIEW:-In Review}"
 COL_APPROVED="${COL_APPROVED:-Approved}"
 COL_CHANGES="${COL_CHANGES:-In Progress}"
 COL_NO_PR="${COL_NO_PR:-To Do}"
+COL_BACKLOG="${COL_BACKLOG:-Backlog}"
+COL_TODO="${COL_TODO:-To Do}"
+COL_DEV="${COL_DEV:-In Progress}"
 REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
 REPO_NAME="${GITHUB_REPOSITORY##*/}"
 
@@ -105,7 +127,11 @@ OPTIONS=$(tail -n +2 <<< "$PROJECT_INFO")
 
 option_id() { awk -F '\t' -v name="$1" '$1 == name { print $2; exit }' <<< "$OPTIONS"; }
 
-if [ "$AUTO" = 1 ]; then
+if [ "$DEV_MODE" = 1 ]; then
+  for col in "$COL_BACKLOG" "$COL_TODO" "$COL_DEV"; do
+    [ -n "$(option_id "$col")" ] || fail "opção '$col' não existe no campo '$STATUS_FIELD'"
+  done
+elif [ "$AUTO" = 1 ]; then
   for col in "$COL_DRAFT" "$COL_REVIEW" "$COL_APPROVED" "$COL_CHANGES" "$COL_NO_PR"; do
     [ -n "$(option_id "$col")" ] || fail "opção '$col' não existe no campo '$STATUS_FIELD'"
   done
@@ -113,6 +139,70 @@ else
   [ -n "$(option_id "$STATUS")" ] || fail "opção '$STATUS' não existe no campo '$STATUS_FIELD'"
 fi
 log "Project $PROJECT_ID | campo $FIELD_ID"
+
+# ④ Move o Item (respeita --dry-run). Uso: move_item número itemId statusAtual destino
+move_item() {
+  if [ "$DRY_RUN" = 1 ]; then
+    log "[dry-run] #$1: '${3:-sem status}' → '$4' (item $2)"
+    return
+  fi
+  gh api graphql -f project="$PROJECT_ID" -f item="$2" -f field="$FIELD_ID" -f option="$(option_id "$4")" -f query='
+    mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+      updateProjectV2ItemFieldValue(input: {
+        projectId: $project, itemId: $item, fieldId: $field,
+        value: { singleSelectOptionId: $option }
+      }) { projectV2Item { id } }
+    }' --silent
+  log "#$1: '${3:-sem status}' → '$4'"
+}
+
+if [ "$DEV_MODE" = 1 ]; then
+  # Issues abertas deste repositório, no Project, com branch vinculada.
+  # Saída: número␟itemId␟statusAtual␟branches vinculadas (separadas por vírgula)
+  # Não há consulta "branch → Issue" na API: percorre os Items e filtra por linkedBranches.
+  for attempt in $(seq 1 "$LINK_RETRIES"); do
+    ROWS=$(gh api graphql --paginate -F owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -F field="$STATUS_FIELD" -f query="
+      query(\$owner: String!, \$number: Int!, \$field: String!, \$endCursor: String) {
+        $OWNER_TYPE(login: \$owner) {
+          projectV2(number: \$number) {
+            items(first: 100, after: \$endCursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                id
+                status: fieldValueByName(name: \$field) { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                content { ... on Issue { number state repository { nameWithOwner } linkedBranches(first: 10) { nodes { ref { name } } } } }
+              }
+            }
+          }
+        }
+      }" --jq ".data.$OWNER_TYPE.projectV2.items.nodes[]
+             | select(.content.state == \"OPEN\" and .content.repository.nameWithOwner == \"$GITHUB_REPOSITORY\")
+             | [.content.number, .id, (.status.name // \"\"), ([.content.linkedBranches.nodes[].ref.name // empty] | join(\",\"))]
+             | select(.[3] != \"\") | map(tostring) | join(\"\u001f\")")
+    [ -n "$BRANCH" ] || break
+    ROWS=$(awk -F '\x1f' -v b="$BRANCH" '{ n = split($4, a, ","); for (i = 1; i <= n; i++) if (a[i] == b) { print; next } }' <<< "$ROWS")
+    [ -n "$ROWS" ] && break
+    if [ "$attempt" -lt "$LINK_RETRIES" ]; then
+      log "branch '$BRANCH' ainda sem Issue vinculada (tentativa $attempt/$LINK_RETRIES); aguardando ${LINK_RETRY_DELAY}s"
+      sleep "$LINK_RETRY_DELAY"
+    fi
+  done
+  if [ -z "$ROWS" ]; then
+    log "${BRANCH:+branch '$BRANCH': }nenhuma Issue aberta do Project com branch vinculada. Nada a fazer."
+    exit 0
+  fi
+  while IFS=$'\x1f' read -r NUMBER ITEM_ID CURRENT BRANCHES; do
+    [ -n "$NUMBER" ] || continue
+    case "$CURRENT" in
+      "$COL_BACKLOG"|"$COL_TODO"|"")
+        log "#$NUMBER: branch vinculada [$BRANCHES] em '${CURRENT:-sem status}' → '$COL_DEV'"
+        move_item "$NUMBER" "$ITEM_ID" "$CURRENT" "$COL_DEV" ;;
+      *)
+        log "#$NUMBER: branch vinculada [$BRANCHES], mas está em '$CURRENT'; nada a fazer." ;;
+    esac
+  done <<< "$ROWS"
+  exit 0
+fi
 
 # Coluna de um PR pelo seu estado na API. Saída: estado␟coluna (coluna vazia se o PR não está aberto).
 # latestOpinionatedReviews(writersOnly) = última review com opinião de cada pessoa com Write,
@@ -204,7 +294,7 @@ else
     }" --jq ".data.repository.issue | $ITEM_JQ")
 fi
 
-# ④ Atualiza cada Item.
+# Atualiza cada Item.
 while IFS=$'\x1f' read -r NUMBER ISSUE_STATE ITEM_ID CURRENT OPEN_PRS; do
   [ -n "$NUMBER" ] || continue
   if [ -z "$ITEM_ID" ]; then
@@ -258,16 +348,5 @@ while IFS=$'\x1f' read -r NUMBER ISSUE_STATE ITEM_ID CURRENT OPEN_PRS; do
     log "#$NUMBER já está em '$TARGET'; nada a fazer."
     continue
   fi
-  if [ "$DRY_RUN" = 1 ]; then
-    log "[dry-run] #$NUMBER: '${CURRENT:-sem status}' → '$TARGET' (item $ITEM_ID)"
-    continue
-  fi
-  gh api graphql -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f option="$(option_id "$TARGET")" -f query='
-    mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
-      updateProjectV2ItemFieldValue(input: {
-        projectId: $project, itemId: $item, fieldId: $field,
-        value: { singleSelectOptionId: $option }
-      }) { projectV2Item { id } }
-    }' --silent
-  log "#$NUMBER: '${CURRENT:-sem status}' → '$TARGET'"
+  move_item "$NUMBER" "$ITEM_ID" "$CURRENT" "$TARGET"
 done <<< "$ROWS"
