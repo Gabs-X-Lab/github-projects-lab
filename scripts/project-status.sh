@@ -7,14 +7,20 @@
 #   scripts/project-status.sh --pr 12 --auto [--dry-run]
 #   scripts/project-status.sh --issue 4 --status "Backlog" [--dry-run]
 #
-# --auto calcula a coluna pelo estado atual do PR (consultado na API):
-#   PR fechado/mergeado               → nada a fazer
-#   rascunho                          → COL_DRAFT
-#   reviewDecision APPROVED           → COL_APPROVED
-#   reviewDecision CHANGES_REQUESTED  → COL_CHANGES
-#   reviewDecision REVIEW_REQUIRED    → COL_REVIEW
-#   reviewDecision ausente (sem regra de review): últimas reviews de quem tem Write
-#     alguma CHANGES_REQUESTED → COL_CHANGES; alguma APPROVED → COL_APPROVED; senão COL_REVIEW
+# --auto calcula a coluna de cada Issue vinculada ao PR olhando TODOS os PRs
+# abertos que fecham essa Issue (o PR informado + os demais):
+#   coluna de um PR aberto:
+#     rascunho                          → COL_DRAFT
+#     reviewDecision APPROVED           → COL_APPROVED
+#     reviewDecision CHANGES_REQUESTED  → COL_CHANGES
+#     reviewDecision REVIEW_REQUIRED    → COL_REVIEW
+#     reviewDecision ausente (sem regra de review): últimas reviews de quem tem Write
+#       alguma CHANGES_REQUESTED → COL_CHANGES; alguma APPROVED → COL_APPROVED; senão COL_REVIEW
+#   com vários PRs abertos, vale a coluna mais avançada:
+#     COL_APPROVED > COL_REVIEW > COL_CHANGES > COL_DRAFT
+#   sem nenhum PR aberto:
+#     PR informado foi mergeado → nada a fazer (o workflow nativo "Item closed" leva a Done)
+#     PR informado foi fechado sem merge → COL_NO_PR
 #
 # Configuração (variáveis de ambiente):
 #   PROJECT_OWNER      dono do Project (login do usuário ou da organização)  [obrigatória]
@@ -24,17 +30,17 @@
 #   STATUS_FIELD       nome do campo de status (padrão: "Status")
 #   LINK_RETRIES       tentativas quando o PR ainda não tem Issues vinculadas (padrão: 5)
 #   LINK_RETRY_DELAY   segundos entre tentativas (padrão: 3)
-#   COL_DRAFT / COL_REVIEW / COL_APPROVED / COL_CHANGES
+#   COL_DRAFT / COL_REVIEW / COL_APPROVED / COL_CHANGES / COL_NO_PR
 #                      nomes das colunas do --auto (padrão: "Draft PR", "In Review",
-#                      "Approved", "In Progress")
+#                      "Approved", "In Progress", "To Do")
 #
 # Requer apenas o GitHub CLI (`gh`) autenticado, com acesso ao Project
 # (escopo `project`). Usa o `--jq` embutido no gh; não depende de `jq`.
 
 set -euo pipefail
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
-log()   { echo "[project-status] $*"; }
+usage() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit "${1:-1}"; }
+log()   { echo "[project-status] $*" >&2; }
 fail()  { echo "[project-status] ERRO: $*" >&2; exit 1; }
 
 PR="" ISSUE="" STATUS="" AUTO=0 DRY_RUN=0
@@ -64,6 +70,11 @@ OWNER_TYPE="${OWNER_TYPE:-user}"
 STATUS_FIELD="${STATUS_FIELD:-Status}"
 LINK_RETRIES="${LINK_RETRIES:-5}"
 LINK_RETRY_DELAY="${LINK_RETRY_DELAY:-3}"
+COL_DRAFT="${COL_DRAFT:-Draft PR}"
+COL_REVIEW="${COL_REVIEW:-In Review}"
+COL_APPROVED="${COL_APPROVED:-Approved}"
+COL_CHANGES="${COL_CHANGES:-In Progress}"
+COL_NO_PR="${COL_NO_PR:-To Do}"
 REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
 REPO_NAME="${GITHUB_REPOSITORY##*/}"
 
@@ -72,53 +83,8 @@ case "$OWNER_TYPE" in
   *) fail "OWNER_TYPE deve ser 'user' ou 'organization'" ;;
 esac
 
-# --auto: decide a coluna pelo estado consolidado do PR.
-if [ "$AUTO" = 1 ]; then
-  COL_DRAFT="${COL_DRAFT:-Draft PR}"
-  COL_REVIEW="${COL_REVIEW:-In Review}"
-  COL_APPROVED="${COL_APPROVED:-Approved}"
-  COL_CHANGES="${COL_CHANGES:-In Progress}"
-
-  # Saída: estado<TAB>draft<TAB>reviewDecision<TAB>nº CHANGES_REQUESTED<TAB>nº APPROVED<TAB>reviews
-  # latestOpinionatedReviews(writersOnly) = última review com opinião de cada pessoa com Write,
-  # a mesma regra que o GitHub usa para a regra de review obrigatória.
-  PR_STATE=$(gh api graphql -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F pr="$PR" -f query='
-    query($owner: String!, $repo: String!, $pr: Int!) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $pr) {
-          state isDraft reviewDecision
-          latestOpinionatedReviews(first: 100, writersOnly: true) { nodes { state author { login } } }
-        }
-      }
-    }' --jq '.data.repository.pullRequest | (.latestOpinionatedReviews.nodes) as $r |
-      [.state, .isDraft, (.reviewDecision // ""),
-       ([$r[] | select(.state == "CHANGES_REQUESTED")] | length),
-       ([$r[] | select(.state == "APPROVED")] | length),
-       ([$r[] | "\(.author.login)=\(.state)"] | join(","))] | @tsv')
-  IFS=$'\t' read -r PR_STATUS IS_DRAFT DECISION N_CHANGES N_APPROVED REVIEWS <<< "$PR_STATE"
-  log "PR #$PR: state=$PR_STATUS draft=$IS_DRAFT reviewDecision=${DECISION:-null} reviews=[${REVIEWS}]"
-
-  if [ "$PR_STATUS" != "OPEN" ]; then
-    log "PR #$PR está $PR_STATUS; --auto não altera PRs fechados/mergeados."
-    exit 0
-  elif [ "$IS_DRAFT" = "true" ]; then
-    STATUS="$COL_DRAFT"
-  else
-    case "$DECISION" in
-      APPROVED)          STATUS="$COL_APPROVED" ;;
-      CHANGES_REQUESTED) STATUS="$COL_CHANGES" ;;
-      REVIEW_REQUIRED)   STATUS="$COL_REVIEW" ;;
-      *)  # sem regra de review obrigatória: reviewDecision vem null
-        if   [ "$N_CHANGES" -gt 0 ];  then STATUS="$COL_CHANGES"
-        elif [ "$N_APPROVED" -gt 0 ]; then STATUS="$COL_APPROVED"
-        else                               STATUS="$COL_REVIEW"
-        fi ;;
-    esac
-  fi
-  log "--auto → '$STATUS'"
-fi
-
-# ③ Project, campo e opção — resolvidos por nome.
+# ③ Project, campo e todas as opções — resolvidos por nome.
+# 1ª linha: projectId<TAB>fieldId; demais linhas: nomeDaOpção<TAB>optionId
 PROJECT_INFO=$(gh api graphql -F owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -F field="$STATUS_FIELD" -f query="
   query(\$owner: String!, \$number: Int!, \$field: String!) {
     $OWNER_TYPE(login: \$owner) {
@@ -127,18 +93,88 @@ PROJECT_INFO=$(gh api graphql -F owner="$PROJECT_OWNER" -F number="$PROJECT_NUMB
         field(name: \$field) { ... on ProjectV2SingleSelectField { id options { id name } } }
       }
     }
-  }" --jq ".data.$OWNER_TYPE.projectV2 | [.id, .field.id, (.field.options[] | select(.name == \"$STATUS\") | .id)] | @tsv")
+  }" --jq ".data.$OWNER_TYPE.projectV2 | \"\(.id)\t\(.field.id // \"\")\", ((.field.options // [])[] | \"\(.name)\t\(.id)\")")
 
-IFS=$'\t' read -r PROJECT_ID FIELD_ID OPTION_ID <<< "$PROJECT_INFO"
-[ -n "${PROJECT_ID:-}" ] || fail "Project $PROJECT_OWNER/$PROJECT_NUMBER não encontrado (ou sem acesso)"
-[ -n "${FIELD_ID:-}" ]   || fail "campo '$STATUS_FIELD' não encontrado no Project"
-[ -n "${OPTION_ID:-}" ]  || fail "opção '$STATUS' não existe no campo '$STATUS_FIELD'"
-log "Project $PROJECT_ID | campo $FIELD_ID | '$STATUS' = $OPTION_ID"
+IFS=$'\t' read -r PROJECT_ID FIELD_ID <<< "$(head -n 1 <<< "$PROJECT_INFO")"
+OPTIONS=$(tail -n +2 <<< "$PROJECT_INFO")
+[ -n "${PROJECT_ID:-}" ] && [ "$PROJECT_ID" != "null" ] || fail "Project $PROJECT_OWNER/$PROJECT_NUMBER não encontrado (ou sem acesso)"
+[ -n "${FIELD_ID:-}" ] || fail "campo '$STATUS_FIELD' não encontrado no Project"
 
-# Saída de cada consulta: uma linha por Issue →  número<TAB>itemId<TAB>statusAtual
+option_id() { awk -F '\t' -v name="$1" '$1 == name { print $2; exit }' <<< "$OPTIONS"; }
+
+if [ "$AUTO" = 1 ]; then
+  for col in "$COL_DRAFT" "$COL_REVIEW" "$COL_APPROVED" "$COL_CHANGES" "$COL_NO_PR"; do
+    [ -n "$(option_id "$col")" ] || fail "opção '$col' não existe no campo '$STATUS_FIELD'"
+  done
+else
+  [ -n "$(option_id "$STATUS")" ] || fail "opção '$STATUS' não existe no campo '$STATUS_FIELD'"
+fi
+log "Project $PROJECT_ID | campo $FIELD_ID"
+
+# Coluna de um PR pelo seu estado na API. Saída: estado␟coluna (coluna vazia se o PR não está aberto).
+# latestOpinionatedReviews(writersOnly) = última review com opinião de cada pessoa com Write,
+# a mesma regra que o GitHub usa para a regra de review obrigatória.
+pr_column() {
+  local state draft decision n_changes n_approved reviews column=""
+  IFS=$'\x1f' read -r state draft decision n_changes n_approved reviews <<< "$(
+    gh api graphql -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F pr="$1" -f query='
+      query($owner: String!, $repo: String!, $pr: Int!) {
+        repository(owner: $owner, name: $repo) {
+          pullRequest(number: $pr) {
+            state isDraft reviewDecision
+            latestOpinionatedReviews(first: 100, writersOnly: true) { nodes { state author { login } } }
+          }
+        }
+      }' --jq '.data.repository.pullRequest | (.latestOpinionatedReviews.nodes) as $r |
+        [.state, .isDraft, (.reviewDecision // ""),
+         ([$r[] | select(.state == "CHANGES_REQUESTED")] | length),
+         ([$r[] | select(.state == "APPROVED")] | length),
+         ([$r[] | "\(.author.login)=\(.state)"] | join(","))] | map(tostring) | join("\u001f")')"
+
+  if [ "$state" = "OPEN" ]; then
+    if [ "$draft" = "true" ]; then
+      column="$COL_DRAFT"
+    else
+      case "$decision" in
+        APPROVED)          column="$COL_APPROVED" ;;
+        CHANGES_REQUESTED) column="$COL_CHANGES" ;;
+        REVIEW_REQUIRED)   column="$COL_REVIEW" ;;
+        *)  # sem regra de review obrigatória: reviewDecision vem null
+          if   [ "$n_changes" -gt 0 ];  then column="$COL_CHANGES"
+          elif [ "$n_approved" -gt 0 ]; then column="$COL_APPROVED"
+          else                               column="$COL_REVIEW"
+          fi ;;
+      esac
+    fi
+  fi
+  log "PR #$1: state=$state draft=$draft reviewDecision=${decision:-null} reviews=[$reviews] → '${column:-—}'"
+  printf '%s\x1f%s\n' "$state" "$column"
+}
+
+# Ordem de "avanço" entre colunas, para escolher entre vários PRs abertos.
+rank() {
+  case "$1" in
+    "$COL_APPROVED") echo 4 ;;
+    "$COL_REVIEW")   echo 3 ;;
+    "$COL_CHANGES")  echo 2 ;;
+    "$COL_DRAFT")    echo 1 ;;
+    *)               echo 0 ;;
+  esac
+}
+
+if [ "$AUTO" = 1 ]; then
+  IFS=$'\x1f' read -r TRIGGER_STATE TRIGGER_COLUMN <<< "$(pr_column "$PR")"
+fi
+
+# Saída de cada consulta: uma linha por Issue →
+#   número␟itemId␟statusAtual␟PRs abertos que fecham a Issue (separados por vírgula)
 # (itemId vazio = a Issue não está neste Project)
-ITEM_JQ="[.number, ([.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\")][0] // {} | .id // \"\", .status.name // \"\")] | @tsv"
-ITEM_FIELDS="number projectItems(first: 20) { nodes { id project { id } status: fieldValueByName(name: \$field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }"
+ITEM_JQ="[.number,
+  ([.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\")][0] // {} | .id // \"\", .status.name // \"\"),
+  ([.closedByPullRequestsReferences.nodes[].number | tostring] | join(\",\"))] | map(tostring) | join(\"\u001f\")"
+ITEM_FIELDS="number
+  projectItems(first: 20) { nodes { id project { id } status: fieldValueByName(name: \$field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }
+  closedByPullRequestsReferences(first: 20, includeClosedPrs: false) { nodes { number } }"
 
 if [ -n "$PR" ]; then
   # ① + ② PR → Issues vinculadas → Items, em uma consulta.
@@ -165,26 +201,50 @@ else
 fi
 
 # ④ Atualiza cada Item.
-while IFS=$'\t' read -r NUMBER ITEM_ID CURRENT; do
+while IFS=$'\x1f' read -r NUMBER ITEM_ID CURRENT OPEN_PRS; do
   [ -n "$NUMBER" ] || continue
   if [ -z "$ITEM_ID" ]; then
     log "#$NUMBER não está no Project; ignorando."
     continue
   fi
-  if [ "$CURRENT" = "$STATUS" ]; then
-    log "#$NUMBER já está em '$STATUS'; nada a fazer."
+
+  if [ "$AUTO" = 1 ]; then
+    # Candidatos: o PR do evento (se aberto) + os demais PRs abertos da Issue.
+    TARGET="$TRIGGER_COLUMN"
+    [ -z "$TARGET" ] || log "#$NUMBER: PR #$PR (do evento) → '$TARGET'"
+    for other in ${OPEN_PRS//,/ }; do
+      [ "$other" = "$PR" ] && continue
+      IFS=$'\x1f' read -r _ OTHER_COLUMN <<< "$(pr_column "$other")"
+      if [ "$(rank "$OTHER_COLUMN")" -gt "$(rank "$TARGET")" ]; then
+        TARGET="$OTHER_COLUMN"
+      fi
+    done
+    if [ -z "$TARGET" ]; then
+      if [ "$TRIGGER_STATE" = "MERGED" ]; then
+        log "#$NUMBER: PR #$PR mergeado e nenhum outro PR aberto; Done fica com o workflow nativo 'Item closed'."
+        continue
+      fi
+      TARGET="$COL_NO_PR"
+      log "#$NUMBER: nenhum PR aberto (PR #$PR $TRIGGER_STATE) → '$TARGET'"
+    fi
+  else
+    TARGET="$STATUS"
+  fi
+
+  if [ "$CURRENT" = "$TARGET" ]; then
+    log "#$NUMBER já está em '$TARGET'; nada a fazer."
     continue
   fi
   if [ "$DRY_RUN" = 1 ]; then
-    log "[dry-run] #$NUMBER: '${CURRENT:-sem status}' → '$STATUS' (item $ITEM_ID)"
+    log "[dry-run] #$NUMBER: '${CURRENT:-sem status}' → '$TARGET' (item $ITEM_ID)"
     continue
   fi
-  gh api graphql -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f option="$OPTION_ID" -f query='
+  gh api graphql -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f option="$(option_id "$TARGET")" -f query='
     mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
       updateProjectV2ItemFieldValue(input: {
         projectId: $project, itemId: $item, fieldId: $field,
         value: { singleSelectOptionId: $option }
       }) { projectV2Item { id } }
     }' --silent
-  log "#$NUMBER: '${CURRENT:-sem status}' → '$STATUS'"
+  log "#$NUMBER: '${CURRENT:-sem status}' → '$TARGET'"
 done <<< "$ROWS"

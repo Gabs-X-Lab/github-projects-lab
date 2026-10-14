@@ -6,16 +6,19 @@
 #   7b. PR pronto para revisão → "In Review"
 #   7c. Reviews: aprovado → "Approved"; alterações pedidas → "In Progress";
 #       aprovação descartada → volta a "In Review"
+#   7d. PR fechado sem merge → "To Do" (ou a coluna de outro PR aberto da Issue);
+#       PR mergeado → nada (o workflow nativo "Item closed" leva a Issue a Done)
 #
 # Todos os eventos executam o mesmo cálculo (--auto): a coluna é decidida pelo
-# estado consolidado do PR na API (rascunho, reviewDecision, últimas reviews),
-# e não pelo payload do evento. O resultado não depende da ordem dos eventos.
+# estado consolidado de TODOS os PRs abertos da Issue na API (rascunho,
+# reviewDecision, últimas reviews), e não pelo payload do evento.
+# O resultado não depende da ordem dos eventos.
 
 name: Project automation
 
 on:
   pull_request:
-    types: [opened, reopened, converted_to_draft, ready_for_review]
+    types: [opened, reopened, converted_to_draft, ready_for_review, closed]
   pull_request_review:
     types: [submitted, dismissed]
 
@@ -60,6 +63,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
           REVIEW_STATE: ${{ github.event.review.state }}
+          PAYLOAD_MERGED: ${{ github.event.pull_request.merged }}
         run: |
-          echo "Evento: $EVENT_NAME.$EVENT_ACTION${REVIEW_STATE:+ (review: $REVIEW_STATE)}"
+          echo "Evento: $EVENT_NAME.$EVENT_ACTION${REVIEW_STATE:+ (review: $REVIEW_STATE)} | payload merged=${PAYLOAD_MERGED:-<vazio>}"
           scripts/project-status.sh --pr "$PR_NUMBER" --auto
