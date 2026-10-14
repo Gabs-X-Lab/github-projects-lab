@@ -1,0 +1,90 @@
+# Reconciliação do Kanban: rede de segurança para mudanças que não geram evento
+# (vínculo pela barra Development, PR com conflito de merge, eventos perdidos).
+#
+#   Fase 1: cada PR aberto → project-status.sh --pr N --auto
+#   Fase 2: cada Issue aberta parada em coluna de PR (Draft PR / In Review / Approved)
+#           → project-status.sh --issue N --auto (sem PR aberto → To Do)
+#
+# O script é idempotente: rodar sem nada a corrigir não altera o Project.
+
+name: Project reconcile
+
+on:
+  schedule:
+    # A cada hora, segunda a sexta (cron em UTC). Minuto 17 evita o pico de :00.
+    - cron: "17 * * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconciliar colunas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (somente scripts/)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Gerar token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: write
+
+      - name: Reconciliar
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          OWNER_TYPE: ${{ vars.OWNER_TYPE }}
+          LINK_RETRIES: "1"   # vínculos já consolidados; sem espera por PR sem "Closes"
+        run: |
+          failures=0
+
+          echo "Fase 1: PRs abertos"
+          for pr in $(gh pr list -R "$GITHUB_REPOSITORY" --state open --limit 200 --json number --jq '.[].number'); do
+            echo "::group::PR #$pr"
+            scripts/project-status.sh --pr "$pr" --auto || failures=$((failures + 1))
+            echo "::endgroup::"
+          done
+
+          echo "Fase 2: Issues abertas em colunas de PR"
+          issues=$(gh api graphql --paginate -F owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -f query="
+            query(\$owner: String!, \$number: Int!, \$endCursor: String) {
+              $OWNER_TYPE(login: \$owner) {
+                projectV2(number: \$number) {
+                  items(first: 100, after: \$endCursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      status: fieldValueByName(name: \"Status\") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
+                      content { ... on Issue { number state repository { nameWithOwner } } }
+                    }
+                  }
+                }
+              }
+            }" --jq ".data.$OWNER_TYPE.projectV2.items.nodes[]
+                   | select(.content.state == \"OPEN\" and .content.repository.nameWithOwner == \"$GITHUB_REPOSITORY\")
+                   | select(.status.name == \"Draft PR\" or .status.name == \"In Review\" or .status.name == \"Approved\")
+                   | .content.number")
+          for issue in $issues; do
+            echo "::group::Issue #$issue"
+            scripts/project-status.sh --issue "$issue" --auto || failures=$((failures + 1))
+            echo "::endgroup::"
+          done
+
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::$failures item(ns) falharam na reconciliação"
+            exit 1
+          fi

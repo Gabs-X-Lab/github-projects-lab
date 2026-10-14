@@ -20,6 +20,7 @@
 9. [Etapa 5 — GraphQL na mão](#9-etapa-5--graphql-na-mão)
 10. [Etapa 6 — Credencial do Actions (GitHub App)](#10-etapa-6--credencial-do-actions-github-app)
 11. [Etapa 7 — Automação com GitHub Actions](#11-etapa-7--automação-com-github-actions)
+12. [Etapa 8 — Casos de borda](#12-etapa-8--casos-de-borda)
 
 **Apêndices**
 
@@ -1164,7 +1165,9 @@ O caso afetado era justamente `reviewDecision = null` (repositório sem review o
 | E | PR-A reaberto | `reopened` | `PR #16 (do evento) → 'Draft PR'` | To Do → **Draft PR** |
 | F | PR-A fechado; Issue fechada *not planned* | `closed` | `→ 'To Do'`; depois nativo | **To Do** → **Done** (nativo) |
 | G | Issue fechada, evento de PR dela | (local, `--dry-run`) | `#15 está fechada; --auto não altera Issues fechadas.` | — |
-| H | Merge do PR #14 | `closed`, `merged=?` | *(registrar após o merge)* | #13 → **Done** (nativo) |
+| H | Merge do PR #14 | `closed`, **`merged=true`** | `PR #14: state=MERGED → '—'`; `#13 está fechada; --auto não altera Issues fechadas.` | #13 → **Done** (o nativo fechou a Issue antes da Action rodar) |
+
+> Resultado do teste H: o campo `merged` **veio preenchido** no payload do evento `closed`. A nota da documentação sobre payload vazio não se aplicou a esse campo — mas decidir pelo estado na API continua sendo o mais robusto.
 
 Como reproduzir os testes A–F (PRs descartáveis com commit vazio):
 
@@ -1176,6 +1179,99 @@ gh pr create --draft --head test/pr-a --title "test: PR-A" --body "Closes #N"
 gh pr close <PR-B>; gh pr close <PR-A>; gh pr reopen <PR-A>; gh pr close <PR-A> --delete-branch
 gh issue close N --reason "not planned"
 ```
+
+---
+
+## 12. Etapa 8 — Casos de borda
+
+Testes com Issues e PRs descartáveis (#19, #20; PRs #21, #22, #23), depois fechados como *not planned* e com as branches apagadas.
+
+### 12.1 Resultados
+
+| # | Caso | Como reproduzir | Resultado |
+|---|---|---|---|
+| 1 | PR **sem** `Closes #N` (só `Refs #19`) | `gh pr create ... --body "Refs #19"` | Retry exercitado (5 tentativas × 3 s); termina com *"não fecha nenhuma Issue. Nada a fazer."*, sem erro |
+| 2 | PR que fecha **duas** Issues | `--body "Closes #19, closes #20"` | As duas → Draft PR; ao fechar sem merge, as duas → To Do |
+| 3a | `Closes` adicionado **editando a descrição** | `gh pr edit N --body "... Closes #19"` | Vínculo criado na API, mas **nenhuma execução** (`edited` não estava nos `types`) → card parado |
+| 3b | Vínculo pela **barra Development** do PR | Interface: *Development* → ⚙ → escolher a Issue | Timeline registra `ConnectedEvent`, mas **nenhum evento do Actions** → card parado |
+| 4 | PR com **conflito de merge** | Branch a partir de um commit antigo alterando uma linha que a `main` também mudou | `mergeable=CONFLICTING`; **nenhuma execução** em `opened`, nem em `closed` |
+| 5 | Recuperação | Próximo evento de qualquer PR da Issue (ex.: `converted_to_draft`) | Recalcula tudo, inclusive considerando o PR com conflito (que fecha a mesma Issue) |
+
+### 12.2 `reviewDecision` sem regra de review obrigatório (cenário de repositório privado no plano Free)
+
+Ruleset desligado temporariamente (`enforcement: disabled`, depois religado):
+
+```bash
+gh api -X PUT repos/ORG/REPO/rulesets/ID -f enforcement=disabled
+gh api -X PUT repos/ORG/REPO/rulesets/ID -f enforcement=active
+```
+
+| PR | Reviews | `reviewDecision` |
+|---|---|---|
+| #23 | nenhuma | `null` |
+| #21 | Approve | `APPROVED` |
+| #21 | Request changes | `CHANGES_REQUESTED` |
+
+**Conclusão:** sem regra de review obrigatório, `reviewDecision` só é `null` **enquanto não há reviews**. O cálculo por `latestOpinionatedReviews` raramente decide sozinho, mas permanece como proteção. O caso `null` sem reviews é exatamente onde o bug do separador (11.5) derrubaria o script — a correção era necessária.
+
+| Ação (revisora) | #19 (só PR #21) | #20 (PR #21 + PR #23 com conflito) |
+|---|---|---|
+| Approve | → **Approved** | → **Approved** (PR #21 é o mais avançado) |
+| Request changes | → **In Progress** | → **In Review** (agora vence o PR #23) |
+
+### 12.3 Soluções adotadas
+
+| Lacuna | Solução |
+|---|---|
+| `Closes` adicionado editando a descrição | `edited` nos `types` do `project-automation.yml` |
+| Vínculo pela barra Development; PR com conflito; eventos perdidos | **Reconciliação agendada** (`project-reconcile.yml`) |
+| Histórico da `main` com commits de merge | Ruleset: `allowed_merge_methods: ["squash"]` |
+
+#### Reconciliação agendada — `.github/workflows/project-reconcile.yml`
+
+```yaml
+on:
+  schedule:
+    - cron: "17 * * * 1-5"   # a cada hora, seg–sex (UTC)
+  workflow_dispatch:          # botão "Run workflow"
+```
+
+| Fase | Percorre | Chama | Cobre |
+|---|---|---|---|
+| 1 | PRs abertos (`gh pr list --state open`) | `--pr N --auto` | Vínculo pela barra Development; PR aberto com conflito |
+| 2 | Issues **abertas** do repositório em *Draft PR / In Review / Approved* (consulta GraphQL paginada) | `--issue N --auto` | Issue "órfã": PR fechado sem gerar evento (ex.: com conflito) → To Do |
+
+- `--issue N --auto` (novo no script): calcula pelos PRs abertos da Issue; **sem PR aberto**, só move para To Do se a Issue estiver em coluna de PR. Backlog, To Do e In Progress (que também é usado manualmente) não são tocados.
+- `LINK_RETRIES=1`: na reconciliação os vínculos já estão consolidados; evita 12 s de espera por PR sem `Closes`.
+- Falha em um item não interrompe os demais; o job termina com erro se algum falhar (`::error::`).
+- A fase 2 usa `gh api graphql` em vez de `gh project item-list`: o `gh project` verifica escopos de token de usuário, o que pode falhar com token de GitHub App.
+
+**Observações sobre `schedule`**
+
+- O cron é em **UTC** (`17 * * * 1-5` = minuto 17 de cada hora, segunda a sexta UTC; no Brasil, UTC−3).
+- Execuções agendadas podem atrasar em horários de pico do GitHub.
+- Só roda a partir da **branch padrão**; o botão *Run workflow* também só aparece com o arquivo na branch padrão.
+- Em repositórios **públicos**, workflows agendados são desativados após 60 dias sem atividade no repositório.
+- Custo em repositório privado: ~1 execução/hora × 24 × 22 dias úteis ≈ 530 execuções/mês (arredondadas para 1 min cada). Pode ser reduzido a horário comercial, ex.: `17 11-21 * * 1-5` (8h–18h no Brasil).
+
+**Teste local** (mesmo bloco `run` do workflow, com o token do usuário): Issue #18 colocada de propósito em *Approved* sem nenhum PR → fase 2 → `#18: em 'Approved' sem nenhum PR aberto → 'To Do'`.
+
+#### Merge somente por squash
+
+```json
+{ "type": "pull_request", "parameters": { "...": "...", "allowed_merge_methods": ["squash"] } }
+```
+
+> No `PUT` de um ruleset, `rules` **substitui a lista inteira**: enviar todas as regras, não só a alterada.
+
+### 12.4 Limitações conhecidas
+
+| Limitação | Mitigação |
+|---|---|
+| Múltiplos revisores não testados (exige uma terceira conta) | A lógica usa `reviewDecision` / `latestOpinionatedReviews`, que já consolidam vários revisores |
+| Reconciliação tem atraso de até 1 hora | Aceitável para casos raros; o botão *Run workflow* força na hora |
+| PR de **fork** não recebe secrets | A reconciliação (que roda no repositório) cobre esses PRs |
+| Issue em *In Progress* sem PR não é corrigida automaticamente | Intencional: *In Progress* também é usado manualmente |
 
 ---
 
@@ -1262,7 +1358,12 @@ gh issue close N --reason "not planned"
 | 41 | `closingIssuesReferences` continua retornando as Issues em PR **fechado sem merge** | O evento `closed` consegue achar a Issue a atualizar |
 | 42 | `read` com `IFS=$'\t'` junta tabulações consecutivas e desloca campos vazios | Usar separador que não seja espaço em branco (`\x1f`) |
 | 43 | Uma Issue fechada pode continuar com PRs abertos vinculados | Automação não deve tirar de Done uma Issue fechada |
-| 44 | A documentação é contraditória sobre o payload de PR mergeado | Decidir pelo estado na API, não pelo payload |
+| 44 | A documentação é contraditória sobre o payload de PR mergeado | Decidir pelo estado na API, não pelo payload (na prática, `merged=true` veio preenchido) |
+| 45 | Editar a descrição para adicionar `Closes` gera `pull_request.edited` (não incluído por padrão) | Incluir `edited` nos `types` |
+| 46 | Vínculo pela barra Development gera `ConnectedEvent` na timeline, mas nenhum evento do Actions | Reconciliação agendada |
+| 47 | PR com conflito não dispara nenhum `pull_request`, nem `closed` | Reconciliação agendada (fase 2 trata a Issue órfã) |
+| 48 | Sem regra de review, `reviewDecision` só é `null` enquanto o PR não tem reviews | O fallback raramente decide, mas o caminho `null` precisa funcionar |
+| 49 | `PUT` de ruleset substitui a lista `rules` inteira | Enviar todas as regras ao alterar uma |
 
 ---
 
@@ -1288,8 +1389,8 @@ gh issue close N --reason "not planned"
 - [x] Etapa 4 — Workflows nativos
 - [x] Etapa 5 — GraphQL na mão
 - [x] Etapa 6 — Credencial (GitHub App) e Secrets
-- [ ] Etapa 7 — Actions: Draft PR, In Review, Approved, Merge/Closed
-- [ ] Etapa 8 — Casos de borda
+- [x] Etapa 7 — Actions: Draft PR, In Review, Approved, Merge/Closed
+- [x] Etapa 8 — Casos de borda
 - [ ] Etapa 9 — Detectar início de desenvolvimento
 - [ ] Etapa 10 — Migração do ROADMAP.md
 - [ ] Etapa 11 — Demo

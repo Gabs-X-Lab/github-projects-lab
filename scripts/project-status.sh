@@ -6,9 +6,10 @@
 #   scripts/project-status.sh --pr 12 --status "Draft PR" [--dry-run]
 #   scripts/project-status.sh --pr 12 --auto [--dry-run]
 #   scripts/project-status.sh --issue 4 --status "Backlog" [--dry-run]
+#   scripts/project-status.sh --issue 4 --auto [--dry-run]
 #
-# --auto calcula a coluna de cada Issue vinculada ao PR olhando TODOS os PRs
-# abertos que fecham essa Issue (o PR informado + os demais):
+# --auto calcula a coluna de cada Issue (as vinculadas ao PR informado, ou a
+# Issue informada) olhando TODOS os PRs abertos que fecham essa Issue:
 #   coluna de um PR aberto:
 #     rascunho                          → COL_DRAFT
 #     reviewDecision APPROVED           → COL_APPROVED
@@ -19,8 +20,10 @@
 #   com vários PRs abertos, vale a coluna mais avançada:
 #     COL_APPROVED > COL_REVIEW > COL_CHANGES > COL_DRAFT
 #   sem nenhum PR aberto:
-#     PR informado foi mergeado → nada a fazer (o workflow nativo "Item closed" leva a Done)
-#     PR informado foi fechado sem merge → COL_NO_PR
+#     --pr: PR informado foi mergeado → nada a fazer (o workflow nativo "Item closed" leva a Done)
+#           PR informado foi fechado sem merge → COL_NO_PR
+#     --issue: Issue em coluna de PR (COL_DRAFT/COL_REVIEW/COL_APPROVED) → COL_NO_PR;
+#              em qualquer outra coluna → não altera
 #   Issues fechadas não são alteradas (ficam com os workflows nativos do Project).
 #
 # Configuração (variáveis de ambiente):
@@ -60,7 +63,6 @@ done
 [ -n "$PR" ] || [ -n "$ISSUE" ] || fail "informe --pr ou --issue"
 if [ "$AUTO" = 1 ]; then
   [ -z "$STATUS" ] || fail "use --status ou --auto, não os dois"
-  [ -n "$PR" ]     || fail "--auto exige --pr"
 else
   [ -n "$STATUS" ] || fail "--status (ou --auto) é obrigatório"
 fi
@@ -163,7 +165,8 @@ rank() {
   esac
 }
 
-if [ "$AUTO" = 1 ]; then
+TRIGGER_STATE="" TRIGGER_COLUMN=""
+if [ "$AUTO" = 1 ] && [ -n "$PR" ]; then
   IFS=$'\x1f' read -r TRIGGER_STATE TRIGGER_COLUMN <<< "$(pr_column "$PR")"
 fi
 
@@ -216,9 +219,9 @@ while IFS=$'\x1f' read -r NUMBER ISSUE_STATE ITEM_ID CURRENT OPEN_PRS; do
   fi
 
   if [ "$AUTO" = 1 ]; then
-    # Candidatos: o PR do evento (se aberto) + os demais PRs abertos da Issue.
+    # Candidatos: o PR informado (se aberto) + os demais PRs abertos da Issue.
     TARGET="$TRIGGER_COLUMN"
-    [ -z "$TARGET" ] || log "#$NUMBER: PR #$PR (do evento) → '$TARGET'"
+    [ -z "$TARGET" ] || log "#$NUMBER: PR #$PR (informado) → '$TARGET'"
     for other in ${OPEN_PRS//,/ }; do
       [ "$other" = "$PR" ] && continue
       IFS=$'\x1f' read -r _ OTHER_COLUMN <<< "$(pr_column "$other")"
@@ -227,12 +230,25 @@ while IFS=$'\x1f' read -r NUMBER ISSUE_STATE ITEM_ID CURRENT OPEN_PRS; do
       fi
     done
     if [ -z "$TARGET" ]; then
-      if [ "$TRIGGER_STATE" = "MERGED" ]; then
+      if [ -n "$ISSUE" ]; then
+        # Modo --issue: só corrige Issues paradas em coluna de PR sem nenhum PR aberto
+        # (ex.: PR fechado com conflito, que não gera evento). COL_CHANGES (In Progress)
+        # também é usado manualmente, por isso não entra.
+        case "$CURRENT" in
+          "$COL_DRAFT"|"$COL_REVIEW"|"$COL_APPROVED")
+            TARGET="$COL_NO_PR"
+            log "#$NUMBER: em '$CURRENT' sem nenhum PR aberto → '$TARGET'" ;;
+          *)
+            log "#$NUMBER: sem PR aberto e em '${CURRENT:-sem status}' (não é coluna de PR); nada a fazer."
+            continue ;;
+        esac
+      elif [ "$TRIGGER_STATE" = "MERGED" ]; then
         log "#$NUMBER: PR #$PR mergeado e nenhum outro PR aberto; Done fica com o workflow nativo 'Item closed'."
         continue
+      else
+        TARGET="$COL_NO_PR"
+        log "#$NUMBER: nenhum PR aberto (PR #$PR $TRIGGER_STATE) → '$TARGET'"
       fi
-      TARGET="$COL_NO_PR"
-      log "#$NUMBER: nenhum PR aberto (PR #$PR $TRIGGER_STATE) → '$TARGET'"
     fi
   else
     TARGET="$STATUS"
