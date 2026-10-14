@@ -21,6 +21,7 @@
 #   sem nenhum PR aberto:
 #     PR informado foi mergeado → nada a fazer (o workflow nativo "Item closed" leva a Done)
 #     PR informado foi fechado sem merge → COL_NO_PR
+#   Issues fechadas não são alteradas (ficam com os workflows nativos do Project).
 #
 # Configuração (variáveis de ambiente):
 #   PROJECT_OWNER      dono do Project (login do usuário ou da organização)  [obrigatória]
@@ -167,12 +168,12 @@ if [ "$AUTO" = 1 ]; then
 fi
 
 # Saída de cada consulta: uma linha por Issue →
-#   número␟itemId␟statusAtual␟PRs abertos que fecham a Issue (separados por vírgula)
+#   número␟estadoDaIssue␟itemId␟statusAtual␟PRs abertos que fecham a Issue (separados por vírgula)
 # (itemId vazio = a Issue não está neste Project)
-ITEM_JQ="[.number,
+ITEM_JQ="[.number, .state,
   ([.projectItems.nodes[] | select(.project.id == \"$PROJECT_ID\")][0] // {} | .id // \"\", .status.name // \"\"),
   ([.closedByPullRequestsReferences.nodes[].number | tostring] | join(\",\"))] | map(tostring) | join(\"\u001f\")"
-ITEM_FIELDS="number
+ITEM_FIELDS="number state
   projectItems(first: 20) { nodes { id project { id } status: fieldValueByName(name: \$field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } } }
   closedByPullRequestsReferences(first: 20, includeClosedPrs: false) { nodes { number } }"
 
@@ -201,10 +202,16 @@ else
 fi
 
 # ④ Atualiza cada Item.
-while IFS=$'\x1f' read -r NUMBER ITEM_ID CURRENT OPEN_PRS; do
+while IFS=$'\x1f' read -r NUMBER ISSUE_STATE ITEM_ID CURRENT OPEN_PRS; do
   [ -n "$NUMBER" ] || continue
   if [ -z "$ITEM_ID" ]; then
     log "#$NUMBER não está no Project; ignorando."
+    continue
+  fi
+
+  if [ "$AUTO" = 1 ] && [ "$ISSUE_STATE" = "CLOSED" ]; then
+    # Issue fechada fica com os workflows nativos (Item closed → Done; Item reopened → To Do).
+    log "#$NUMBER está fechada; --auto não altera Issues fechadas."
     continue
   fi
 
