@@ -19,6 +19,7 @@
 8. [Etapa 4 — Workflows nativos do Project](#8-etapa-4--workflows-nativos-do-project)
 9. [Etapa 5 — GraphQL na mão](#9-etapa-5--graphql-na-mão)
 10. [Etapa 6 — Credencial do Actions (GitHub App)](#10-etapa-6--credencial-do-actions-github-app)
+11. [Etapa 7 — Automação com GitHub Actions](#11-etapa-7--automação-com-github-actions)
 
 **Apêndices**
 
@@ -895,6 +896,89 @@ A aprovação já existente passou a contar imediatamente (`APPROVED` / `mergeSt
 
 ---
 
+## 11. Etapa 7 — Automação com GitHub Actions
+
+Arquivo: `.github/workflows/project-automation.yml`. Implementado **um evento por vez**; a lógica de GraphQL fica no `scripts/project-status.sh`.
+
+### 11.1 Eventos validados na documentação
+
+Fonte: *Events that trigger workflows* (docs.github.com).
+
+| Achado | Impacto |
+|---|---|
+| Sem `types:`, `pull_request` só dispara em `opened`, `synchronize`, `reopened` | `converted_to_draft` e `ready_for_review` precisam ser listados |
+| *"Workflows will not run on `pull_request` activity if the pull request has a merge conflict."* | PR com conflito **não move o card** (falha silenciosa) |
+| PR de fork: secrets não são entregues; `GITHUB_TOKEN` só leitura | A automação não funciona para PRs de fork |
+| `pull_request_target` roda com secrets mesmo para forks e é marcado como risco | **Não usado**: entregaria o token do App a código de fork |
+| `pull_request_review`: tipos `submitted`, `edited`, `dismissed` (todos por padrão) | Filtrar na Etapa 7c |
+
+### 11.2 Etapa 7a — PR rascunho → "Draft PR"
+
+| Evento `pull_request` | Condição | Ação |
+|---|---|---|
+| `opened` | `draft == true` | Issue vinculada → **Draft PR** |
+| `converted_to_draft` | — | Issue vinculada → **Draft PR** |
+| `reopened` | `draft == true` | Issue vinculada → **Draft PR** |
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, converted_to_draft]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-automation-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  draft-pr:
+    if: github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha> # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - id: app-token
+        uses: actions/create-github-app-token@<sha> # v3.3.0
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: write
+      - env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          OWNER_TYPE: ${{ vars.OWNER_TYPE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/project-status.sh --pr "$PR_NUMBER" --status "Draft PR"
+```
+
+| Decisão | Motivo |
+|---|---|
+| `if:` no job | Job é pulado (*skipped*) sem gastar minutos nem gerar token |
+| `concurrency` por PR, sem cancelar | Eventos quase simultâneos do mesmo PR rodam em fila, na ordem |
+| Token com escrita **só** em Projects | Issues/PRs continuam leitura |
+| `sparse-checkout: scripts` + `persist-credentials: false` | Baixa só o script; `GITHUB_TOKEN` não fica gravado no runner |
+| Valores do evento passados por `env:` e usados como `"$PR_NUMBER"` | Evita interpolar `${{ }}` direto no shell (injeção de comandos) |
+
+> **Risco conhecido:** em `pull_request`, o workflow e o script executados são a versão **do PR**. Quem tem Write pode alterá-los e usar o token do App (que só tem escrita no Project). Por isso conceder Write é decisão de confiança — e PRs de fork não recebem secrets.
+
+**Testes (PR #7 → Issue #6)**
+
+| # | Cenário | Como reproduzir | Resultado |
+|---|---|---|---|
+| 1 | Abrir PR rascunho | `gh pr create --draft` com `Closes #6` | ✅ Automação: `#6: 'Backlog' → 'Draft PR'` (a própria automação do PR) |
+| 2 | Marcar como pronto | `gh pr ready 7` | ✅ Nenhuma execução (`ready_for_review` ainda não está em `types`) |
+| 3 | Voltar para rascunho | (card movido para In Review) → `gh pr ready 7 --undo` | ✅ Automação: `#6: 'In Review' → 'Draft PR'` |
+| 4 | Novos commits no PR | `git push` | ✅ Nenhuma execução (`synchronize` não está em `types`) |
+
+---
+
 ## Apêndice A — Referência rápida de comandos `gh`
 
 | Comando | Para quê |
@@ -967,6 +1051,9 @@ A aprovação já existente passou a contar imediatamente (`APPROVED` / `mergeSt
 | 30 | Membros de org nova têm permissão base **Read** | Dar Write por repositório (menor privilégio), não na base da org |
 | 31 | `app-id` da `create-github-app-token` está obsoleto na v3 | Usar `client-id` |
 | 32 | O token do App pode ser emitido com menos permissões que o App tem (`permission-*`) | Cada workflow pede só o que usa |
+| 33 | `paths:` em `pull_request` avalia o diff **do PR inteiro**, não só do último push | Enquanto o PR contém o arquivo filtrado, todo push dispara o workflow |
+| 34 | `pull_request` não dispara em PR com conflito de merge | Card fica parado até o conflito ser resolvido |
+| 35 | Workflow vindo no próprio PR já roda nesse PR | Permite autoteste da automação antes do merge |
 
 ---
 
