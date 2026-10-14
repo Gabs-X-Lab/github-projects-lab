@@ -977,45 +977,6 @@ jobs:
 | 3 | Voltar para rascunho | (card movido para In Review) → `gh pr ready 7 --undo` | ✅ Automação: `#6: 'In Review' → 'Draft PR'` |
 | 4 | Novos commits no PR | `git push` | ✅ Nenhuma execução (`synchronize` não está em `types`) |
 
-### 11.3 Etapa 7b — PR pronto para revisão → "In Review"
-
-| Evento `pull_request` | `draft` no payload | Coluna |
-|---|---|---|
-| `opened` / `reopened` | `true` / `false` | Draft PR / **In Review** |
-| `converted_to_draft` | sempre `true` | Draft PR |
-| `ready_for_review` (**novo**) | sempre `false` | **In Review** |
-
-Para todos esses eventos, a coluna depende **só do campo `draft`**. Em vez de dois jobs com os mesmos passos, um único job calcula a coluna:
-
-```yaml
-on:
-  pull_request:
-    types: [opened, reopened, converted_to_draft, ready_for_review]
-
-jobs:
-  sync-status:
-    steps:
-      # ... checkout e token iguais à 7a ...
-      - env:
-          EVENT_ACTION: ${{ github.event.action }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          STATUS: ${{ github.event.pull_request.draft && 'Draft PR' || 'In Review' }}
-        run: |
-          echo "Evento: $EVENT_ACTION | draft: $IS_DRAFT → '$STATUS'"
-          scripts/project-status.sh --pr "$PR_NUMBER" --status "$STATUS"
-```
-
-- `cond && 'a' || 'b'` é o "if ternário" das expressões do Actions. Cuidado: só funciona quando `'a'` não é um valor "falso" (`''`, `0`, `false`), senão o resultado cai sempre em `'b'`.
-- O `echo` com o evento e a coluna escolhida deixa o log autoexplicativo para quem investigar uma execução.
-
-**Testes (PR #9 → Issue #8)**
-
-| # | Cenário | Como reproduzir | Log da automação | Card |
-|---|---|---|---|---|
-| 1 | PR aberto já pronto | `gh pr create` (sem `--draft`) com `Closes #8` | `Evento: opened \| draft: false → 'In Review'` | Backlog → **In Review** |
-| 2 | Volta para rascunho (regressão da 7a) | `gh pr ready 9 --undo` | `Evento: converted_to_draft \| draft: true → 'Draft PR'` | In Review → **Draft PR** |
-| 3 | Pronto para revisão | `gh pr ready 9` | `Evento: ready_for_review \| draft: false → 'In Review'` | Draft PR → **In Review** |
-
 ---
 
 ## Apêndice A — Referência rápida de comandos `gh`
