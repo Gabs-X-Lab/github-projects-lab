@@ -55,11 +55,12 @@ Sugestão → Backlog → To Do → In Progress → Draft PR → In Review → A
 |---|---|---|
 | Issue criada → entra no Project em **Backlog** | Nativos *Auto-add to project* + *Item added to project* | ✅ funcionando |
 | Issue reaberta → **To Do** | Nativo *Item reopened* | ✅ funcionando |
-| PR vinculado → In Progress | Nativo *Pull request linked to issue* | ⚪ desligado na Etapa 4 (a Action decidirá pelo `isDraft`) |
-| Draft PR → Draft PR | GitHub Actions | ⏳ Etapa 7a |
-| Ready for review → In Review | GitHub Actions | ⏳ Etapa 7b |
-| Aprovado → Approved | GitHub Actions | ⏳ Etapa 7c |
-| Merge → Done | GitHub fecha a Issue + nativo *Item closed* | ✅ funcionando |
+| PR vinculado → In Progress | Nativo *Pull request linked to issue* | ⚪ desligado na Etapa 4 (substituído pela Action) |
+| PR rascunho aberto/reaberto/convertido → **Draft PR** | GitHub Actions (`project-automation.yml`) | ✅ Etapa 7a |
+| PR pronto para revisão → **In Review** | GitHub Actions | ✅ Etapa 7b |
+| Aprovado → **Approved**; alterações pedidas → **In Progress**; aprovação descartada → **In Review** | GitHub Actions | ✅ Etapa 7c |
+| PR fechado sem merge → **To Do** (ou coluna de outro PR aberto) | GitHub Actions | ✅ Etapa 7d |
+| Merge → **Done** | GitHub fecha a Issue + nativo *Item closed* | ✅ funcionando |
 
 ---
 
@@ -1093,6 +1094,89 @@ Revisora: conta `Gabriel-Pixaflow` (Write no repositório), em janela anônima �
 
 **Pendente para a Etapa 8:** múltiplos revisores (exige uma terceira conta) e o caminho `reviewDecision = null` (repositório sem review obrigatório — testável desativando o ruleset temporariamente).
 
+### 11.5 Etapa 7d — Fechamento, reabertura e vários PRs por Issue
+
+#### Fechado sem merge ≠ aprovado esperando merge
+
+| | PR **aberto** e aprovado | PR **fechado** sem merge |
+|---|---|---|
+| Botão de merge | Disponível | Não existe (PR fechado não pode ser mergeado) |
+| O que vai acontecer | Merge → Done | Nada, a menos que o PR seja **reaberto** |
+| Coluna correta | Approved | Approved seria falso → **To Do** (trabalho não entregue, volta para a fila) |
+
+Se o fechamento foi engano, reabrir o PR recalcula a coluna (aprovações continuam válidas).
+
+#### Regra: considerar todos os PRs abertos da Issue
+
+```
+Para cada Issue (aberta) vinculada ao PR do evento:
+  candidatos = PR do evento (se aberto) + outros PRs ABERTOS que fecham a Issue
+  ├─ há candidatos → coluna mais avançada: Approved > In Review > In Progress > Draft PR
+  └─ nenhum aberto
+       ├─ PR do evento mergeado → não altera (nativo "Item closed" leva a Done)
+       └─ PR do evento fechado  → To Do (COL_NO_PR)
+Issues fechadas → não altera (ficam com os workflows nativos)
+```
+
+| Ponto | Escolha | Motivo |
+|---|---|---|
+| Outros PRs da Issue | `Issue.closedByPullRequestsReferences(includeClosedPrs: false)` | Vínculo inverso do `closingIssuesReferences` |
+| PR do evento sempre é candidato | Somado manualmente | O vínculo é assíncrono: logo após `opened`, o PR pode ainda não aparecer na lista da Issue |
+| Merge | Não altera | O nativo já leva a Done; duas automações na mesma transição só criariam disputa |
+| Issue fechada | Não altera | Evita tirar de Done uma Issue já entregue quando outro PR dela recebe eventos |
+
+No workflow, `closed` entra nos `types`:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, converted_to_draft, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted, dismissed]
+```
+
+#### Documentação contraditória sobre o payload de PR mergeado
+
+A página *Events that trigger workflows* traz um exemplo com `if: github.event.pull_request.merged == true` no evento `closed`, mas uma nota na mesma página diz que o payload *"is empty for merged pull requests"*. O `--auto` **não depende do payload**: lê `state` (`MERGED`/`CLOSED`) na API. O workflow loga `payload merged=...` para verificar na prática.
+
+#### Bug corrigido: campos vazios no `read`
+
+O `read` com `IFS=$'\t'` trata tabulação como espaço em branco e **junta tabulações consecutivas**: um campo vazio no meio desloca os seguintes.
+
+```bash
+printf 'OPEN\tfalse\t\t0\t1\tGabriel=APPROVED\n' | { IFS=$'\t' read -r s d dec nc na r; echo "decision='$dec' n_changes=$nc"; }
+# decision='0' n_changes=1   ← errado: PR aprovado seria tratado como "alterações pedidas"
+printf 'OPEN\x1ffalse\x1f\x1f0\x1f1\x1fGabriel=APPROVED\n' | { IFS=$'\x1f' read -r s d dec nc na r; echo "decision='$dec' n_changes=$nc"; }
+# decision='' n_changes=0    ← correto
+```
+
+O caso afetado era justamente `reviewDecision = null` (repositório sem review obrigatório). Correção: separador `\x1f` (*unit separator*, não é espaço em branco), gerado no jq com `join("\u001f")`.
+
+#### Testes (Issue de teste #15 com PR-A #16 e PR-B #17; PR #14 → Issue #13)
+
+| # | Ação | Evento | Log do `--auto` | Card |
+|---|---|---|---|---|
+| 0 | PR #14 aberto pronto (regressão) | `pull_request.opened` | `PR #14 (do evento) → 'In Review'` | #13: Backlog → **In Review** |
+| A | PR-A aberto como rascunho | `opened` | `PR #16 (do evento) → 'Draft PR'` | #15: Backlog → **Draft PR** |
+| B | PR-B aberto pronto | `opened` | `PR #17 → 'In Review'`; `PR #16 → 'Draft PR'` (outro aberto) | **In Review** (o mais avançado) |
+| C | PR-B fechado sem merge | `closed`, `merged=false` | `PR #17 CLOSED → '—'`; `PR #16 → 'Draft PR'` | In Review → **Draft PR** (decide o PR-A) |
+| D | PR-A fechado sem merge | `closed`, `merged=false` | `nenhum PR aberto (PR #16 CLOSED) → 'To Do'` | Draft PR → **To Do** |
+| E | PR-A reaberto | `reopened` | `PR #16 (do evento) → 'Draft PR'` | To Do → **Draft PR** |
+| F | PR-A fechado; Issue fechada *not planned* | `closed` | `→ 'To Do'`; depois nativo | **To Do** → **Done** (nativo) |
+| G | Issue fechada, evento de PR dela | (local, `--dry-run`) | `#15 está fechada; --auto não altera Issues fechadas.` | — |
+| H | Merge do PR #14 | `closed`, `merged=?` | *(registrar após o merge)* | #13 → **Done** (nativo) |
+
+Como reproduzir os testes A–F (PRs descartáveis com commit vazio):
+
+```bash
+gh issue create --title "Teste: Issue com dois PRs" --body "..."
+git checkout -b test/pr-a && git commit --allow-empty -m "test: PR-A" && git push -u origin test/pr-a
+gh pr create --draft --head test/pr-a --title "test: PR-A" --body "Closes #N"
+# idem test/pr-b sem --draft; depois:
+gh pr close <PR-B>; gh pr close <PR-A>; gh pr reopen <PR-A>; gh pr close <PR-A> --delete-branch
+gh issue close N --reason "not planned"
+```
+
 ---
 
 ## Apêndice A — Referência rápida de comandos `gh`
@@ -1175,6 +1259,10 @@ Revisora: conta `Gabriel-Pixaflow` (Write no repositório), em janela anônima �
 | 38 | `latestOpinionatedReviews(writersOnly: true)` reproduz a regra de aprovação do GitHub | Permite calcular "aprovado" quando `reviewDecision` é `null` |
 | 39 | Job com `if:` falso aparece como execução *skipped* | Não gasta minutos nem gera token, mas aparece na lista de execuções |
 | 40 | O botão **Revert** de um PR mergeado cria um PR de reversão (ex.: PR #10, fechado sem merge) | Conferir `mergedAt` antes de supor que algo foi desfeito |
+| 41 | `closingIssuesReferences` continua retornando as Issues em PR **fechado sem merge** | O evento `closed` consegue achar a Issue a atualizar |
+| 42 | `read` com `IFS=$'\t'` junta tabulações consecutivas e desloca campos vazios | Usar separador que não seja espaço em branco (`\x1f`) |
+| 43 | Uma Issue fechada pode continuar com PRs abertos vinculados | Automação não deve tirar de Done uma Issue fechada |
+| 44 | A documentação é contraditória sobre o payload de PR mergeado | Decidir pelo estado na API, não pelo payload |
 
 ---
 
