@@ -22,6 +22,7 @@
 11. [Etapa 7 — Automação com GitHub Actions](#11-etapa-7--automação-com-github-actions)
 12. [Etapa 8 — Casos de borda](#12-etapa-8--casos-de-borda)
 13. [Etapa 9 — Início do desenvolvimento](#13-etapa-9--início-do-desenvolvimento)
+14. [Etapa 10 — Importação do ROADMAP.md](#14-etapa-10--importação-do-roadmapmd)
 
 **Apêndices**
 
@@ -1372,6 +1373,80 @@ Issues descartáveis #26, #27, #28 (fechadas como *not planned*); branches apaga
 
 ---
 
+## 14. Etapa 10 — Importação do ROADMAP.md
+
+**Objetivo:** levar o conteúdo do `ROADMAP.md` para o Project **uma única vez**. O arquivo **não é alterado** e não há sincronização depois: a partir da importação, o Project passa a ser a fonte da verdade.
+
+### 14.1 Mapeamento
+
+| No ROADMAP.md | No GitHub |
+|---|---|
+| `## Q4 2026 — MVP` | **Milestone** de mesmo título (precisa existir) |
+| `### Autenticação`, `### Agenda`… | **Label** `area:*` (tabela `AREA_LABELS` no script) + `enhancement` |
+| `## Débitos técnicos` | Label `tech-debt`, sem milestone |
+| `- [ ] Título` | **Issue**, Status **Backlog** |
+| `🚧` | Status **In Progress** |
+| `- [x] Título` | Issue criada e **fechada como concluída** → nativo *Item closed* → **Done** |
+| `🔴 🟡 🟢` / `(P/M/G)` / `@login` | **Priority** / **Size** / **Assignee** |
+| Subitem (indentado) | **Sub-issue** do item acima (`addSubIssue`) |
+| `## Sugestões` (`- texto`) | **Draft Issue** em **Sugestão** (só no Project) |
+
+### 14.2 Script `scripts/roadmap-migrate.py`
+
+Python 3 só com a biblioteca padrão + `gh` (parse de markdown em bash seria frágil). Mesmas variáveis de ambiente do `project-status.sh`:
+
+```bash
+export PROJECT_OWNER=Gabs-X-Lab PROJECT_NUMBER=1 OWNER_TYPE=organization GITHUB_REPOSITORY=Gabs-X-Lab/github-projects-lab
+
+python3 scripts/roadmap-migrate.py                # simulação (padrão): mostra o que faria
+python3 scripts/roadmap-migrate.py --apply        # grava no GitHub
+python3 scripts/roadmap-migrate.py --file outro.md --apply
+```
+
+> No Windows, `python3` pode não existir: usar `py -3`.
+
+Estrutura:
+
+| Parte | Responsabilidade |
+|---|---|
+| `parse_roadmap()` | **Adaptador do formato**: lê o markdown e devolve itens (hierárquicos) e sugestões. Não acessa o GitHub |
+| `GitHub` | Resolve IDs **por nome** (repositório, labels, milestones, Project, campos e opções) e faz as mutations |
+| `import_items()` | Cria Issue → adiciona ao Project → Priority/Size → sub-issue → fecha (`[x]`) ou define o Status |
+| `verify_status()` | Confere o Status depois de alguns segundos e reaplica se um workflow nativo sobrescreveu |
+
+**Idempotência**
+
+- Cada Issue recebe um marcador oculto no corpo: `<!-- roadmap: q4-2026-mvp/agenda/cadastro-de-profissionais -->`.
+- Na próxima execução, Issue com o marcador **ou** (sem marcador) com o mesmo título é mantida como está — não sobrescreve o que o time já mudou. Foi assim que a #1, criada à mão na Etapa 3, foi reaproveitada.
+- Draft Issues: comparadas pelo título.
+
+**Para outro formato** (ex.: os `docs/plans/*.md` da empresa): escrever outro `parse_*()` que devolva a mesma lista de `Item`; o restante não muda.
+
+### 14.3 Execução no laboratório
+
+| Execução | Resultado |
+|---|---|
+| Simulação | 31 itens (29 principais + 2 subitens), 5 sugestões; #1 detectada como existente |
+| 1ª com `--apply` | Criou #32–#39 e **falhou** na #39: `addProjectV2ItemById` → *"Content already exists in this project"* (o Auto-add chegou primeiro) |
+| Correção | Script passou a buscar o item pela Issue nesse erro; a #39 (já com marcador) foi completada à mão com as funções do próprio script |
+| 2ª com `--apply` | #32–#39 existentes; criou #40–#61 e as 5 Draft Issues. `verify_status` não precisou reaplicar nada |
+| 3ª com `--apply` | `criadas=0, existentes=31, sugestões criadas=0, sugestões existentes=5` |
+
+Conferência no Project: `[x]` em Done (fechadas como concluídas), `🚧` em In Progress, #35 (2FA) com as sub-issues #36 e #37, prioridades e tamanhos preenchidos; subitens sem Priority/Size (o ROADMAP não informa).
+
+Tempo: ~1,5 s por Issue (pausa de 0,7 s entre criações, por causa do limite secundário de criação de conteúdo da API).
+
+### 14.4 O que vai para o repositório da empresa
+
+| Arquivo | Precisa estar no repositório do produto? | Motivo |
+|---|---|---|
+| `scripts/roadmap-migrate.py` | **Não** | Roda uma vez, na máquina de quem migra, apontando para o repositório/Project da empresa |
+| `scripts/project-status.sh` + workflows | **Só se houver automação por Actions** | Os workflows executam o script a partir do checkout do repositório. Pode ficar em `.github/scripts/` (ajustar caminho e `sparse-checkout`) |
+
+As alternativas com e sem arquivos no repositório do produto são comparadas na Etapa 11.
+
+---
+
 ## Apêndice A — Referência rápida de comandos `gh`
 
 | Comando | Para quê |
@@ -1467,6 +1542,9 @@ Issues descartáveis #26, #27, #28 (fechadas como *not planned*); branches apaga
 | 52 | Não há evento do Actions para "branch vinculada à Issue" nem consulta "branch → Issue" na API | Percorrer os Items e filtrar `linkedBranches`; reconciliação para vínculo posterior |
 | 53 | `linkedBranches` é lido com *Issues: read* no token do GitHub App (sem *Contents*) | Nenhuma permissão nova no App |
 | 54 | Depois que o PR da branch é fechado sem merge, a branch **não volta** para `linkedBranches` | Sem "pingue-pongue" entre a fase 2 (→ To Do) e a fase 3 (→ In Progress) |
+| 55 | `addProjectV2ItemById` **não** é idempotente: se o Auto-add adicionou antes, falha com *"Content already exists in this project"* | Tratar o erro e buscar o item por `Issue.projectItems` |
+| 56 | Definir o Status logo após adicionar o item não foi sobrescrito pelo *Item added to project* (30 Issues) | Conferência posterior mantida no script como proteção |
+| 57 | Sub-issues: `addSubIssue(issueId: pai, subIssueId: filho)`; o Project tem os campos *Parent issue* / *Sub-issues progress* | Subitens do markdown viram hierarquia real |
 
 ---
 
@@ -1487,6 +1565,9 @@ Issues descartáveis #26, #27, #28 (fechadas como *not planned*); branches apaga
 | Início do desenvolvimento (Etapa 9) | **Branch vinculada → In Progress** (só a partir de Backlog / To Do) | Sinal forte e confirmável pela API; nunca retrocede |
 | Atribuição (Etapa 9) | **Não automatizar** | Atribuir é planejamento, não início de trabalho |
 | Workflow do `create` (Etapa 9) | **Separado** (`project-dev-started.yml`) | `concurrency` do `project-automation.yml` é por número de PR |
+| ROADMAP.md (Etapa 10) | **Só importação**; o arquivo não é alterado | Depois da importação, o Project é a fonte da verdade |
+| Itens `[x]` (Etapa 10) | **Criar e fechar** como concluídos | Histórico preservado em Done |
+| Linguagem da importação (Etapa 10) | **Python** (biblioteca padrão) | Parse de markdown; roda uma vez, fora do Actions |
 
 ---
 
@@ -1498,5 +1579,5 @@ Issues descartáveis #26, #27, #28 (fechadas como *not planned*); branches apaga
 - [x] Etapa 7 — Actions: Draft PR, In Review, Approved, Merge/Closed
 - [x] Etapa 8 — Casos de borda
 - [x] Etapa 9 — Detectar início de desenvolvimento
-- [ ] Etapa 10 — Migração do ROADMAP.md
+- [x] Etapa 10 — Migração do ROADMAP.md
 - [ ] Etapa 11 — Demo
