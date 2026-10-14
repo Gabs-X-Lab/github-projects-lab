@@ -1016,6 +1016,77 @@ jobs:
 | 2 | Volta para rascunho (regressão da 7a) | `gh pr ready 9 --undo` | `Evento: converted_to_draft \| draft: true → 'Draft PR'` | In Review → **Draft PR** |
 | 3 | Pronto para revisão | `gh pr ready 9` | `Evento: ready_for_review \| draft: false → 'In Review'` | Draft PR → **In Review** |
 
+### 11.4 Etapa 7c — Reviews → "Approved" / "In Progress"
+
+#### Por que "um evento → uma coluna" não basta
+
+| Situação | Problema |
+|---|---|
+| Dois reviewers: A aprova, B pede alterações | O evento de A diria "Approved", mas o PR não está aprovado |
+| Aprovação descartada (manualmente ou por push) | O evento `dismissed` não diz para qual coluna voltar |
+| Repositório sem review obrigatório | `reviewDecision` vem `null` |
+| Eventos fora de ordem | O último a terminar "vence", mesmo que esteja desatualizado |
+
+#### Solução: calcular a coluna pelo estado consolidado do PR (`--auto`)
+
+Todos os eventos chamam `scripts/project-status.sh --pr N --auto`, que consulta o PR na API e decide:
+
+```
+PR fechado / mergeado              → não altera (Etapa 7d)
+rascunho                           → Draft PR
+reviewDecision = APPROVED          → Approved
+reviewDecision = CHANGES_REQUESTED → In Progress
+reviewDecision = REVIEW_REQUIRED   → In Review
+reviewDecision = null              → latestOpinionatedReviews(writersOnly: true):
+                                       alguma CHANGES_REQUESTED → In Progress
+                                       alguma APPROVED          → Approved
+                                       nenhuma                  → In Review
+```
+
+```graphql
+pullRequest(number: $pr) {
+  state isDraft reviewDecision
+  latestOpinionatedReviews(first: 100, writersOnly: true) { nodes { state author { login } } }
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `reviewDecision` | Decisão consolidada pela regra de review obrigatória (`APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`); `null` sem regra |
+| `latestOpinionatedReviews(writersOnly: true)` | Última review **com opinião** (aprovar/pedir alterações) **de cada pessoa com Write** — a mesma regra do GitHub. Usado quando `reviewDecision` é `null` |
+
+- Nomes das colunas configuráveis: `COL_DRAFT`, `COL_REVIEW`, `COL_APPROVED`, `COL_CHANGES`.
+- *Changes requested* → **In Progress**: a bola voltou para quem desenvolve.
+
+#### Workflow
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, converted_to_draft, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]      # "edited" não muda o estado
+
+jobs:
+  sync-status:
+    # review só com comentário não muda a coluna
+    if: github.event_name != 'pull_request_review' || github.event.review.state != 'commented'
+    steps:
+      # ... checkout e token iguais à 7a ...
+      - run: scripts/project-status.sh --pr "$PR_NUMBER" --auto
+```
+
+> No payload do evento, `review.state` vem em **minúsculas** (`approved`, `commented`, `changes_requested`, `dismissed`); no enum da GraphQL, em maiúsculas (`APPROVED`...).
+
+#### Testes (PR #12 → Issue #11)
+
+Revisora: conta `Gabriel-Pixaflow` (Write no repositório), em janela anônima → *Files changed* → *Review changes*.
+
+| # | Quem | Ação | Evento | Log do `--auto` | Card |
+|---|---|---|---|---|---|
+| 1 | Autor | Abrir PR pronto | `pull_request.opened` | `reviewDecision=REVIEW_REQUIRED reviews=[] → 'In Review'` | Backlog → **In Review** |
+| 2 | Revisora | Approve | `pull_request_review.submitted (approved)` | `reviewDecision=APPROVED reviews=[Gabriel-Pixaflow=APPROVED] → 'Approved'` | In Review → **Approved** |
+
 ---
 
 ## Apêndice A — Referência rápida de comandos `gh`
