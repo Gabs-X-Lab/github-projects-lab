@@ -1,0 +1,56 @@
+# Início do desenvolvimento (Etapa 9): branch vinculada à Issue → "In Progress".
+#
+# "Create a branch" na Issue / `gh issue develop` cria a branch e o vínculo
+# (Issue.linkedBranches). O evento `create` dispara para QUALQUER branch; quem decide
+# é o script, que confirma o vínculo pela API (o nome da branch não é usado).
+# Só move Issues abertas em Backlog / To Do; nunca retrocede.
+#
+# Não existe evento do Actions para "branch vinculada depois de criada": a fase 3
+# do project-reconcile.yml cobre esse caso e eventos perdidos.
+#
+# O `create` usa o arquivo de workflow da branch criada (GITHUB_SHA = último commit dela),
+# e não o da branch padrão.
+
+name: Project dev started
+
+on:
+  create:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: project-dev-started-${{ github.event.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dev-started:
+    name: Mover Issue vinculada para In Progress
+    if: github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (somente scripts/)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Gerar token do GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          permission-issues: read
+          permission-organization-projects: write
+
+      - name: Mover Issue vinculada
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          OWNER_TYPE: ${{ vars.OWNER_TYPE }}
+          BRANCH: ${{ github.event.ref }}
+        run: |
+          echo "Evento: create (branch '$BRANCH')"
+          scripts/project-status.sh --branch "$BRANCH"

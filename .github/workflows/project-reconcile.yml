@@ -4,6 +4,8 @@
 #   Fase 1: cada PR aberto → project-status.sh --pr N --auto
 #   Fase 2: cada Issue aberta parada em coluna de PR (Draft PR / In Review / Approved)
 #           → project-status.sh --issue N --auto (sem PR aberto → To Do)
+#   Fase 3: Issues abertas em Backlog / To Do com branch vinculada
+#           → project-status.sh --linked (→ In Progress; branch vinculada depois de criada)
 #
 # O script é idempotente: rodar sem nada a corrigir não altera o Project.
 
@@ -83,6 +85,9 @@ jobs:
             scripts/project-status.sh --issue "$issue" --auto || failures=$((failures + 1))
             echo "::endgroup::"
           done
+
+          echo "Fase 3: Issues com branch vinculada"
+          scripts/project-status.sh --linked || failures=$((failures + 1))
 
           if [ "$failures" -gt 0 ]; then
             echo "::error::$failures item(ns) falharam na reconciliação"
