@@ -39,7 +39,8 @@
 #   PROJECT_OWNER      dono do Project (login do usuário ou da organização)  [obrigatória]
 #   PROJECT_NUMBER     número do Project (ex.: 1)                             [obrigatória]
 #   OWNER_TYPE         "user" (padrão) ou "organization"
-#   GITHUB_REPOSITORY  "owner/repo" do PR/Issue (o Actions já define)         [obrigatória]
+#   TARGET_REPOSITORY  "owner/repo" dos PRs/Issues (padrão: GITHUB_REPOSITORY, que o Actions
+#                      já define). Permite rodar a partir de outro repositório.  [obrigatória]
 #   STATUS_FIELD       nome do campo de status (padrão: "Status")
 #   LINK_RETRIES       tentativas quando o PR ainda não tem Issues vinculadas (padrão: 5)
 #   LINK_RETRY_DELAY   segundos entre tentativas (padrão: 3)
@@ -87,7 +88,8 @@ else
 fi
 : "${PROJECT_OWNER:?defina PROJECT_OWNER}"
 : "${PROJECT_NUMBER:?defina PROJECT_NUMBER}"
-: "${GITHUB_REPOSITORY:?defina GITHUB_REPOSITORY (owner/repo)}"
+TARGET_REPOSITORY="${TARGET_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+[ -n "$TARGET_REPOSITORY" ] || fail "defina TARGET_REPOSITORY ou GITHUB_REPOSITORY (owner/repo)"
 OWNER_TYPE="${OWNER_TYPE:-user}"
 STATUS_FIELD="${STATUS_FIELD:-Status}"
 LINK_RETRIES="${LINK_RETRIES:-5}"
@@ -100,8 +102,8 @@ COL_NO_PR="${COL_NO_PR:-To Do}"
 COL_BACKLOG="${COL_BACKLOG:-Backlog}"
 COL_TODO="${COL_TODO:-To Do}"
 COL_DEV="${COL_DEV:-In Progress}"
-REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
-REPO_NAME="${GITHUB_REPOSITORY##*/}"
+REPO_OWNER="${TARGET_REPOSITORY%%/*}"
+REPO_NAME="${TARGET_REPOSITORY##*/}"
 
 case "$OWNER_TYPE" in
   user|organization) ;;
@@ -176,7 +178,7 @@ if [ "$DEV_MODE" = 1 ]; then
           }
         }
       }" --jq ".data.$OWNER_TYPE.projectV2.items.nodes[]
-             | select(.content.state == \"OPEN\" and .content.repository.nameWithOwner == \"$GITHUB_REPOSITORY\")
+             | select(.content.state == \"OPEN\" and .content.repository.nameWithOwner == \"$TARGET_REPOSITORY\")
              | [.content.number, .id, (.status.name // \"\"), ([.content.linkedBranches.nodes[].ref.name // empty] | join(\",\"))]
              | select(.[3] != \"\") | map(tostring) | join(\"\u001f\")")
     [ -n "$BRANCH" ] || break

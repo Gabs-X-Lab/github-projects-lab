@@ -23,6 +23,7 @@
 12. [Etapa 8 — Casos de borda](#12-etapa-8--casos-de-borda)
 13. [Etapa 9 — Início do desenvolvimento](#13-etapa-9--início-do-desenvolvimento)
 14. [Etapa 10 — Importação do ROADMAP.md](#14-etapa-10--importação-do-roadmapmd)
+15. [Etapa 11 — Demo e opção B (automação fora do repositório do produto)](#15-etapa-11--demo-e-opção-b-automação-fora-do-repositório-do-produto)
 
 **Apêndices**
 
@@ -1447,6 +1448,55 @@ As alternativas com e sem arquivos no repositório do produto são comparadas na
 
 ---
 
+## 15. Etapa 11 — Demo e opção B (automação fora do repositório do produto)
+
+Material de apresentação: [`APRESENTACAO.md`](APRESENTACAO.md) (problema, diagrama, comparação A/B/C, custos, recomendação, roteiro da demo e checklist do owner).
+
+### 15.1 Três opções de adoção
+
+| Opção | Arquivos no repositório do produto | Automação |
+|---|---|---|
+| **A** | Nenhum | Só workflows nativos do Project; colunas de PR movidas à mão |
+| **B** | Nenhum | Repositório separado (`Gabs-X-Lab/kanban-automation`) com reconciliação agendada |
+| **C** | 3 workflows + `project-status.sh` | Por evento, em segundos (o que foi construído nas Etapas 7–9) |
+
+### 15.2 Opção B — como foi montada
+
+- `project-status.sh` ganhou `TARGET_REPOSITORY` (padrão: `GITHUB_REPOSITORY`): o script opera sobre PRs/Issues de outro repositório. Compatível com o uso anterior.
+- `Gabs-X-Lab/kanban-automation` (público no lab; **privado** na empresa): cópia do script + `.github/workflows/kanban-reconcile.yml` (fases 1–3 da reconciliação, em loop por `TARGET_REPOSITORIES`).
+- Token do App gerado **só para os repositórios do produto**, conforme a documentação da `actions/create-github-app-token`:
+
+  ```yaml
+  with:
+    owner: ${{ vars.PROJECT_OWNER }}
+    repositories: ${{ vars.TARGET_REPOSITORIES }}   # ex.: "repo1,repo2"
+  ```
+
+  O App **não precisa** estar instalado no repositório de automação.
+- Secret `PROJECT_APP_PRIVATE_KEY` cadastrado pelo owner; Variables `PROJECT_APP_CLIENT_ID`, `PROJECT_OWNER`, `PROJECT_NUMBER`, `OWNER_TYPE`, `TARGET_REPOSITORIES`.
+
+### 15.3 Testes
+
+| # | Teste | Resultado |
+|---|---|---|
+| 1 | 1ª execução manual | ❌ `scripts/project-status.sh: Permission denied` — `cp` no Windows não leva o bit de execução para o git. Correção: `git update-index --chmod=+x` |
+| 2 | Execução manual | ✅ token restrito ao repositório do produto leu Project, PRs e `linkedBranches` |
+| 3 | Fluxo completo com os workflows do lab **desligados** (`gh workflow disable`), Issue #64 / PR #65 | ✅ branch → In Progress, Draft PR → Draft PR, pronto → In Review, fechado sem merge → To Do (com *Run workflow*) |
+| 4 | Cron `*/5 * * * *` | ❌ **nenhuma** execução agendada em mais de 45 min após criar o repositório, desligar/religar o workflow e fazer um novo push |
+
+Configuração final do cron no lab: `*/15 11-21 * * 1-5` (a cada 15 min, 8h–18h no Brasil, dias úteis).
+
+### 15.4 Limpeza do Kanban para a demo
+
+- Issues de teste (#15, #19, #20, #26–#28, #64) **arquivadas** no Project (`archiveProjectV2Item`): somem do quadro, continuam no repositório e podem ser restauradas em *Archived items*.
+
+```bash
+gh api graphql -f p=PROJECT_ID -f i=ITEM_ID -f query='
+  mutation($p:ID!,$i:ID!){ archiveProjectV2Item(input:{projectId:$p,itemId:$i}){ item{ isArchived } } }'
+```
+
+---
+
 ## Apêndice A — Referência rápida de comandos `gh`
 
 | Comando | Para quê |
@@ -1545,6 +1595,11 @@ As alternativas com e sem arquivos no repositório do produto são comparadas na
 | 55 | `addProjectV2ItemById` **não** é idempotente: se o Auto-add adicionou antes, falha com *"Content already exists in this project"* | Tratar o erro e buscar o item por `Issue.projectItems` |
 | 56 | Definir o Status logo após adicionar o item não foi sobrescrito pelo *Item added to project* (30 Issues) | Conferência posterior mantida no script como proteção |
 | 57 | Sub-issues: `addSubIssue(issueId: pai, subIssueId: filho)`; o Project tem os campos *Parent issue* / *Sub-issues progress* | Subitens do markdown viram hierarquia real |
+| 58 | `create-github-app-token` com `owner` + `repositories` gera token para **outros** repositórios; o App não precisa estar instalado no repositório que roda o workflow | Automação pode viver fora do repositório do produto (opção B) |
+| 59 | `cp` de um script no Windows cria o arquivo no git **sem** bit de execução (`100644`) | `git update-index --chmod=+x` antes do commit |
+| 60 | Cron recém-criado não disparou nenhuma vez em mais de 45 min (nem após novo push) | Agendamento é "melhor esforço": não prometer tempo real na opção B; testar com *Run workflow* |
+| 61 | `gh workflow disable/enable` liga e desliga workflows sem alterar arquivos | Útil para isolar testes (provar que só a opção B moveu o card) |
+| 62 | Itens arquivados somem das views, mas a Issue continua no repositório | Limpar o quadro sem apagar histórico |
 
 ---
 
@@ -1568,6 +1623,7 @@ As alternativas com e sem arquivos no repositório do produto são comparadas na
 | ROADMAP.md (Etapa 10) | **Só importação**; o arquivo não é alterado | Depois da importação, o Project é a fonte da verdade |
 | Itens `[x]` (Etapa 10) | **Criar e fechar** como concluídos | Histórico preservado em Done |
 | Linguagem da importação (Etapa 10) | **Python** (biblioteca padrão) | Parse de markdown; roda uma vez, fora do Actions |
+| Recomendação de adoção (Etapa 11) | **A + migração** primeiro; evoluir para **B** se mover cards à mão incomodar; **C** se o time aceitar arquivos no repositório | Não exige alterar o código do produto para começar |
 
 ---
 
@@ -1580,4 +1636,4 @@ As alternativas com e sem arquivos no repositório do produto são comparadas na
 - [x] Etapa 8 — Casos de borda
 - [x] Etapa 9 — Detectar início de desenvolvimento
 - [x] Etapa 10 — Migração do ROADMAP.md
-- [ ] Etapa 11 — Demo
+- [x] Etapa 11 — Demo e opção B
