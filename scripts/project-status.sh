@@ -4,7 +4,17 @@
 #
 # Uso:
 #   scripts/project-status.sh --pr 12 --status "Draft PR" [--dry-run]
+#   scripts/project-status.sh --pr 12 --auto [--dry-run]
 #   scripts/project-status.sh --issue 4 --status "Backlog" [--dry-run]
+#
+# --auto calcula a coluna pelo estado atual do PR (consultado na API):
+#   PR fechado/mergeado               → nada a fazer
+#   rascunho                          → COL_DRAFT
+#   reviewDecision APPROVED           → COL_APPROVED
+#   reviewDecision CHANGES_REQUESTED  → COL_CHANGES
+#   reviewDecision REVIEW_REQUIRED    → COL_REVIEW
+#   reviewDecision ausente (sem regra de review): últimas reviews de quem tem Write
+#     alguma CHANGES_REQUESTED → COL_CHANGES; alguma APPROVED → COL_APPROVED; senão COL_REVIEW
 #
 # Configuração (variáveis de ambiente):
 #   PROJECT_OWNER      dono do Project (login do usuário ou da organização)  [obrigatória]
@@ -14,30 +24,39 @@
 #   STATUS_FIELD       nome do campo de status (padrão: "Status")
 #   LINK_RETRIES       tentativas quando o PR ainda não tem Issues vinculadas (padrão: 5)
 #   LINK_RETRY_DELAY   segundos entre tentativas (padrão: 3)
+#   COL_DRAFT / COL_REVIEW / COL_APPROVED / COL_CHANGES
+#                      nomes das colunas do --auto (padrão: "Draft PR", "In Review",
+#                      "Approved", "In Progress")
 #
 # Requer apenas o GitHub CLI (`gh`) autenticado, com acesso ao Project
 # (escopo `project`). Usa o `--jq` embutido no gh; não depende de `jq`.
 
 set -euo pipefail
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 log()   { echo "[project-status] $*"; }
 fail()  { echo "[project-status] ERRO: $*" >&2; exit 1; }
 
-PR="" ISSUE="" STATUS="" DRY_RUN=0
+PR="" ISSUE="" STATUS="" AUTO=0 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pr)      PR="${2:-}"; shift 2 ;;
     --issue)   ISSUE="${2:-}"; shift 2 ;;
     --status)  STATUS="${2:-}"; shift 2 ;;
+    --auto)    AUTO=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage 0 ;;
     *)         fail "argumento desconhecido: $1" ;;
   esac
 done
 
-[ -n "$STATUS" ] || fail "--status é obrigatório"
 [ -n "$PR" ] || [ -n "$ISSUE" ] || fail "informe --pr ou --issue"
+if [ "$AUTO" = 1 ]; then
+  [ -z "$STATUS" ] || fail "use --status ou --auto, não os dois"
+  [ -n "$PR" ]     || fail "--auto exige --pr"
+else
+  [ -n "$STATUS" ] || fail "--status (ou --auto) é obrigatório"
+fi
 : "${PROJECT_OWNER:?defina PROJECT_OWNER}"
 : "${PROJECT_NUMBER:?defina PROJECT_NUMBER}"
 : "${GITHUB_REPOSITORY:?defina GITHUB_REPOSITORY (owner/repo)}"
@@ -52,6 +71,52 @@ case "$OWNER_TYPE" in
   user|organization) ;;
   *) fail "OWNER_TYPE deve ser 'user' ou 'organization'" ;;
 esac
+
+# --auto: decide a coluna pelo estado consolidado do PR.
+if [ "$AUTO" = 1 ]; then
+  COL_DRAFT="${COL_DRAFT:-Draft PR}"
+  COL_REVIEW="${COL_REVIEW:-In Review}"
+  COL_APPROVED="${COL_APPROVED:-Approved}"
+  COL_CHANGES="${COL_CHANGES:-In Progress}"
+
+  # Saída: estado<TAB>draft<TAB>reviewDecision<TAB>nº CHANGES_REQUESTED<TAB>nº APPROVED<TAB>reviews
+  # latestOpinionatedReviews(writersOnly) = última review com opinião de cada pessoa com Write,
+  # a mesma regra que o GitHub usa para a regra de review obrigatória.
+  PR_STATE=$(gh api graphql -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F pr="$PR" -f query='
+    query($owner: String!, $repo: String!, $pr: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pr) {
+          state isDraft reviewDecision
+          latestOpinionatedReviews(first: 100, writersOnly: true) { nodes { state author { login } } }
+        }
+      }
+    }' --jq '.data.repository.pullRequest | (.latestOpinionatedReviews.nodes) as $r |
+      [.state, .isDraft, (.reviewDecision // ""),
+       ([$r[] | select(.state == "CHANGES_REQUESTED")] | length),
+       ([$r[] | select(.state == "APPROVED")] | length),
+       ([$r[] | "\(.author.login)=\(.state)"] | join(","))] | @tsv')
+  IFS=$'\t' read -r PR_STATUS IS_DRAFT DECISION N_CHANGES N_APPROVED REVIEWS <<< "$PR_STATE"
+  log "PR #$PR: state=$PR_STATUS draft=$IS_DRAFT reviewDecision=${DECISION:-null} reviews=[${REVIEWS}]"
+
+  if [ "$PR_STATUS" != "OPEN" ]; then
+    log "PR #$PR está $PR_STATUS; --auto não altera PRs fechados/mergeados."
+    exit 0
+  elif [ "$IS_DRAFT" = "true" ]; then
+    STATUS="$COL_DRAFT"
+  else
+    case "$DECISION" in
+      APPROVED)          STATUS="$COL_APPROVED" ;;
+      CHANGES_REQUESTED) STATUS="$COL_CHANGES" ;;
+      REVIEW_REQUIRED)   STATUS="$COL_REVIEW" ;;
+      *)  # sem regra de review obrigatória: reviewDecision vem null
+        if   [ "$N_CHANGES" -gt 0 ];  then STATUS="$COL_CHANGES"
+        elif [ "$N_APPROVED" -gt 0 ]; then STATUS="$COL_APPROVED"
+        else                               STATUS="$COL_REVIEW"
+        fi ;;
+    esac
+  fi
+  log "--auto → '$STATUS'"
+fi
 
 # ③ Project, campo e opção — resolvidos por nome.
 PROJECT_INFO=$(gh api graphql -F owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -F field="$STATUS_FIELD" -f query="
