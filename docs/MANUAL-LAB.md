@@ -1196,6 +1196,8 @@ Testes com Issues e PRs descartáveis (#19, #20; PRs #21, #22, #23), depois fech
 | 3b | Vínculo pela **barra Development** do PR | Interface: *Development* → ⚙ → escolher a Issue | Timeline registra `ConnectedEvent`, mas **nenhum evento do Actions** → card parado |
 | 4 | PR com **conflito de merge** | Branch a partir de um commit antigo alterando uma linha que a `main` também mudou | `mergeable=CONFLICTING`; **nenhuma execução** em `opened`, nem em `closed` |
 | 5 | Recuperação | Próximo evento de qualquer PR da Issue (ex.: `converted_to_draft`) | Recalcula tudo, inclusive considerando o PR com conflito (que fecha a mesma Issue) |
+| 6 | `edited` (após incluí-lo nos `types`) | PR #24 aberto, depois descrição editada | `Evento: pull_request.edited` executou o `--auto` |
+| 7 | PR de branch criada pela Issue, **sem** `Closes` | `gh issue develop 18` → PR #24 sem palavra-chave | Já vinculado: `opened` moveu a #18 Backlog → **In Review** |
 
 ### 12.2 `reviewDecision` sem regra de review obrigatório (cenário de repositório privado no plano Free)
 
@@ -1364,6 +1366,7 @@ on:
 | 47 | PR com conflito não dispara nenhum `pull_request`, nem `closed` | Reconciliação agendada (fase 2 trata a Issue órfã) |
 | 48 | Sem regra de review, `reviewDecision` só é `null` enquanto o PR não tem reviews | O fallback raramente decide, mas o caminho `null` precisa funcionar |
 | 49 | `PUT` de ruleset substitui a lista `rules` inteira | Enviar todas as regras ao alterar uma |
+| 50 | PR aberto a partir de branch criada pela Issue (*Create a branch* / `gh issue develop`) já nasce vinculado (fecha a Issue) **sem** `Closes #N`; a branch some de `linkedBranches` e o PR passa a aparecer em *Development* | Fluxo recomendado ao time: criar a branch pela Issue (PR #24 → #18) |
 
 ---
 
