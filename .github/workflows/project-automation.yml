@@ -3,12 +3,17 @@
 #
 # Implementado por etapas:
 #   7a. PR rascunho aberto/reaberto/convertido → "Draft PR"
+#   7b. PR pronto para revisão (ready_for_review, ou aberto/reaberto já pronto) → "In Review"
+#
+# Para esses eventos, a coluna depende só do campo `draft` do PR:
+#   draft == true  → "Draft PR"
+#   draft == false → "In Review"
 
 name: Project automation
 
 on:
   pull_request:
-    types: [opened, reopened, converted_to_draft]
+    types: [opened, reopened, converted_to_draft, ready_for_review]
 
 permissions:
   contents: read
@@ -19,9 +24,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  draft-pr:
-    name: Draft PR → "Draft PR"
-    if: github.event.pull_request.draft
+  sync-status:
+    name: Draft PR / In Review
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (somente scripts/)
@@ -40,11 +44,16 @@ jobs:
           permission-pull-requests: read
           permission-organization-projects: write
 
-      - name: Mover Issues vinculadas para "Draft PR"
+      - name: Mover Issues vinculadas
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
           PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
           OWNER_TYPE: ${{ vars.OWNER_TYPE }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: scripts/project-status.sh --pr "$PR_NUMBER" --status "Draft PR"
+          EVENT_ACTION: ${{ github.event.action }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          STATUS: ${{ github.event.pull_request.draft && 'Draft PR' || 'In Review' }}
+        run: |
+          echo "Evento: $EVENT_ACTION | draft: $IS_DRAFT → '$STATUS'"
+          scripts/project-status.sh --pr "$PR_NUMBER" --status "$STATUS"
