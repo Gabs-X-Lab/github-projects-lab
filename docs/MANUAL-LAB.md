@@ -712,6 +712,20 @@ export PROJECT_OWNER=Gabs-X-Lab OWNER_TYPE=organization PROJECT_NUMBER=1 GITHUB_
 
 Única diferença para o modo usuário: a raiz da consulta, `organization(login:)` em vez de `user(login:)`.
 
+**5. Reconfigurar o Auto-add** (interface): *Workflows* → *Auto-add to project* → repositório da org, filtro `is:issue is:open` → *Save and turn on workflow*.
+
+**Testes após a migração**
+
+| Cenário | Resultado |
+|---|---|
+| Issue #1 criada sem `--project` | Entrou no Project em **Backlog** ~5 s depois (Auto-add + Item added) |
+| Script sem `OWNER_TYPE` (padrão `user`) em Project de org | `gh: Could not resolve to a User with the login of 'Gabs-X-Lab'`, exit 1 |
+| `--issue 1 --status "To Do" --dry-run` com `OWNER_TYPE=organization` | `[dry-run] #1: 'Backlog' → 'To Do'` |
+| Mudança real → To Do → Backlog | `'Backlog' → 'To Do'`, depois `'To Do' → 'Backlog'` |
+| Repetição → Backlog | `#1 já está em 'Backlog'; nada a fazer.` |
+
+O script funcionou **sem nenhuma alteração** no Project copiado, que tem IDs novos.
+
 ---
 
 ## 10. Referência rápida de comandos `gh`
@@ -781,6 +795,7 @@ export PROJECT_OWNER=Gabs-X-Lab OWNER_TYPE=organization PROJECT_NUMBER=1 GITHUB_
 | 25 | Mover card não gera evento na Issue nem notificação | Mudança de Status é "silenciosa" para quem acompanha a Issue |
 | 26 | `copyProjectV2` copia campos, views e workflows (com estado), mas não o Auto-add nem a visibilidade | Refazer Auto-add e tornar público após copiar |
 | 27 | Na cópia, IDs de Project e campos mudam; IDs de opções são preservados | Reforça a estratégia de IDs por nome |
+| 28 | Project de org consultado como usuário falha com `Could not resolve to a User` | `OWNER_TYPE=organization` é obrigatório em org |
 
 ---
 
