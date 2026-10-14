@@ -1,0 +1,46 @@
+# Teste de fumaça da credencial do Actions (GitHub App).
+# Gera um token de instalação do App e lê o Project em modo --dry-run.
+# Não altera nada: o token é emitido apenas com permissões de leitura.
+
+name: Project smoke test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/project-status.sh
+      - .github/workflows/project-smoke-test.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Gerar token do GitHub App (somente leitura)
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: read
+
+      - name: Ler o Project (dry-run)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PROJECT_OWNER: ${{ vars.PROJECT_OWNER }}
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+          OWNER_TYPE: ${{ vars.OWNER_TYPE }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -n "$PR_NUMBER" ]; then
+            scripts/project-status.sh --pr "$PR_NUMBER" --status "Draft PR" --dry-run
+          else
+            scripts/project-status.sh --issue 1 --status "To Do" --dry-run
+          fi
