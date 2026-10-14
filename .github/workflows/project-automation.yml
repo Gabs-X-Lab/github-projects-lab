@@ -3,17 +3,21 @@
 #
 # Implementado por etapas:
 #   7a. PR rascunho aberto/reaberto/convertido → "Draft PR"
-#   7b. PR pronto para revisão (ready_for_review, ou aberto/reaberto já pronto) → "In Review"
+#   7b. PR pronto para revisão → "In Review"
+#   7c. Reviews: aprovado → "Approved"; alterações pedidas → "In Progress";
+#       aprovação descartada → volta a "In Review"
 #
-# Para esses eventos, a coluna depende só do campo `draft` do PR:
-#   draft == true  → "Draft PR"
-#   draft == false → "In Review"
+# Todos os eventos executam o mesmo cálculo (--auto): a coluna é decidida pelo
+# estado consolidado do PR na API (rascunho, reviewDecision, últimas reviews),
+# e não pelo payload do evento. O resultado não depende da ordem dos eventos.
 
 name: Project automation
 
 on:
   pull_request:
     types: [opened, reopened, converted_to_draft, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -25,7 +29,9 @@ concurrency:
 
 jobs:
   sync-status:
-    name: Draft PR / In Review
+    name: Sincronizar coluna da Issue
+    # Review só com comentário não muda a coluna.
+    if: github.event_name != 'pull_request_review' || github.event.review.state != 'commented'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (somente scripts/)
@@ -51,9 +57,9 @@ jobs:
           PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
           OWNER_TYPE: ${{ vars.OWNER_TYPE }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_NAME: ${{ github.event_name }}
           EVENT_ACTION: ${{ github.event.action }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          STATUS: ${{ github.event.pull_request.draft && 'Draft PR' || 'In Review' }}
+          REVIEW_STATE: ${{ github.event.review.state }}
         run: |
-          echo "Evento: $EVENT_ACTION | draft: $IS_DRAFT → '$STATUS'"
-          scripts/project-status.sh --pr "$PR_NUMBER" --status "$STATUS"
+          echo "Evento: $EVENT_NAME.$EVENT_ACTION${REVIEW_STATE:+ (review: $REVIEW_STATE)}"
+          scripts/project-status.sh --pr "$PR_NUMBER" --auto
