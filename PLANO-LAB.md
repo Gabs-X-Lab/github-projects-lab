@@ -10,7 +10,7 @@ Plano de estudo e implementação de um Kanban no GitHub Projects (V2), com Issu
 
 | Item | Situação |
 |---|---|
-| Diretório `C:\Repositorios\pixaflow\teste` | Vazio (apenas este plano) |
+| Diretório `C:\Repositorios\lab\teste` | Vazio (apenas este plano) |
 | Git | Não é um repositório: sem `.git`, remote, branches ou histórico |
 | `.github/workflows` | Não existe |
 | `git` | 2.56.0 instalado |
@@ -217,7 +217,7 @@ Criar Issue
 
 - [x] **Conta pessoal ou Organization gratuita?** Começou em conta pessoal; após a Etapa 5, migrado para a org gratuita `Gabs-X-Lab` (Org Project + GitHub App, como na empresa).
 - [x] **Repositório público ou privado?** **Público**, para ter ruleset com review obrigatório no plano Free.
-- [x] **Segunda conta GitHub** para aprovar PRs: `Gabriel-Pixaflow` (member da org); owner e autora: `Gabs-X`.
+- [x] **Segunda conta GitHub** para aprovar PRs: `conta-revisora` (member da org); owner e autora: `Gabs-X`.
 - [x] **Nomes**: repositório `github-projects-lab`, Project "Lab Kanban".
 
 ---
