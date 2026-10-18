@@ -152,7 +152,7 @@ gh auth refresh -h github.com -s project
 |---|---|---|
 | Dono | Organization `Gabs-X-Lab` (plano Free) | Reproduz o cenário de empresa: Project de organização e GitHub App |
 | Conta principal | `Gabs-X` (owner da org) | Autora dos commits e PRs |
-| Conta revisora | `Gabriel-Pixaflow` (member) | O autor de um PR não pode aprová-lo; uma segunda conta é necessária para testar aprovações |
+| Conta revisora | `conta-revisora` (member) | O autor de um PR não pode aprová-lo; uma segunda conta é necessária para testar aprovações |
 | Visibilidade do repo | Público | No plano Free, rulesets/branch protection só existem em repositórios públicos |
 | Visibilidade do Project | Público | Demonstração sem precisar conceder acesso |
 
@@ -1086,15 +1086,15 @@ jobs:
 
 #### Testes (PR #12 → Issue #11)
 
-Revisora: conta `Gabriel-Pixaflow` (Write no repositório), em janela anônima → *Files changed* → *Review changes*.
+Revisora: conta `conta-revisora` (Write no repositório), em janela anônima → *Files changed* → *Review changes*.
 
 | # | Quem | Ação | Evento | Log do `--auto` | Card |
 |---|---|---|---|---|---|
 | 1 | Autor | Abrir PR pronto | `pull_request.opened` | `reviewDecision=REVIEW_REQUIRED reviews=[] → 'In Review'` | Backlog → **In Review** |
-| 2 | Revisora | Approve | `pull_request_review.submitted (approved)` | `reviewDecision=APPROVED reviews=[Gabriel-Pixaflow=APPROVED] → 'Approved'` | In Review → **Approved** |
+| 2 | Revisora | Approve | `pull_request_review.submitted (approved)` | `reviewDecision=APPROVED reviews=[conta-revisora=APPROVED] → 'Approved'` | In Review → **Approved** |
 | 3 | Autor | Push de commit (ninguém clica em *dismiss*) | `pull_request_review.dismissed (dismissed)` — gerado pelo *dismiss stale reviews* do ruleset | `reviewDecision=REVIEW_REQUIRED reviews=[] → 'In Review'` | Approved → **In Review** |
-| 4 | Revisora | Request changes | `pull_request_review.submitted (changes_requested)` | `reviewDecision=CHANGES_REQUESTED reviews=[Gabriel-Pixaflow=CHANGES_REQUESTED] → 'In Progress'` | In Review → **In Progress** |
-| 5 | Revisora | Approve (depois de pedir alterações) | `pull_request_review.submitted (approved)` | `reviewDecision=APPROVED reviews=[Gabriel-Pixaflow=APPROVED] → 'Approved'` | In Progress → **Approved** |
+| 4 | Revisora | Request changes | `pull_request_review.submitted (changes_requested)` | `reviewDecision=CHANGES_REQUESTED reviews=[conta-revisora=CHANGES_REQUESTED] → 'In Progress'` | In Review → **In Progress** |
+| 5 | Revisora | Approve (depois de pedir alterações) | `pull_request_review.submitted (approved)` | `reviewDecision=APPROVED reviews=[conta-revisora=APPROVED] → 'Approved'` | In Progress → **Approved** |
 | 6 | Revisora | Comment | `pull_request_review.submitted (commented)` | — (job **skipped** pelo `if:`) | continua **Approved** |
 
 **Pendente para a Etapa 8:** múltiplos revisores (exige uma terceira conta) e o caminho `reviewDecision = null` (repositório sem review obrigatório — testável desativando o ruleset temporariamente).
